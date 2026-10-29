@@ -89,7 +89,9 @@ jobs:
       #                settings/targets), key default MARKETING_VERSION; all occurrences
       #                must agree. App Store versions are numeric, so a pre-release
       #                version (1.4.2-beta1) matches a manifest holding its X.Y.Z (1.4.2).
-      #   .properties  the `<key>=` line, key default version (e.g. wjm.versionName)
+      #   .properties  the `<key>=` line, key default version (e.g. wjm.versionName). Like the
+      #                iOS manifest it holds X.Y.Z: the Android versionName drops the suffix,
+      #                so a pre-release (1.4.2-beta1) matches 1.4.2.
       - name: Verify the manifest on main carries this version
         shell: bash
         env:
@@ -115,7 +117,8 @@ jobs:
               expected="${VERSION%%-*}" ;;
             *.properties)
               key="${MANIFEST_KEY:-version}"
-              found="$(sed -nE "s/^[[:space:]]*${key//./\\.}[[:space:]]*[=:][[:space:]]*([^[:space:]]+)[[:space:]]*$/\1/p" "$MANIFEST" | tail -n 1)" ;;
+              found="$(sed -nE "s/^[[:space:]]*${key//./\\.}[[:space:]]*[=:][[:space:]]*([^[:space:]]+)[[:space:]]*$/\1/p" "$MANIFEST" | tail -n 1)"
+              expected="${VERSION%%-*}" ;;
             *.json)
               found="$(jq -r '.version // empty' "$MANIFEST")" ;;
             *.toml)

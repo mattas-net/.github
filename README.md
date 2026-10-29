@@ -30,7 +30,7 @@ Version lookup by manifest type:
 | `.json` | `.version` |
 | `.toml` | `[project]`, `[package]` or `[tool.poetry]` `version` |
 | `.yml` / `.yaml` | every `<manifest-key>:` line (default `MARKETING_VERSION`) at any indentation, so top level or nested under `settings`/`targets`; all must agree. A pre-release `1.4.2-beta1` matches `1.4.2`, because App Store versions are numeric. |
-| `.properties` | the `<manifest-key>=` line (default `version`), e.g. `wjm.versionName` |
+| `.properties` | the `<manifest-key>=` line (default `version`), e.g. `wjm.versionName`. Like the iOS manifest it holds `X.Y.Z`: a pre-release `1.4.2-beta1` matches `1.4.2`. |
 
 ### node-ci.yml
 
@@ -137,36 +137,35 @@ merge, then Actions → Release → Run workflow with the version.
 platform job builds that tag, uploads it to the store and attaches the binary
 to the release.
 
-- **Tags** are bare semver: `1.4.2`, or a pre-release `1.4.2-alpha1`,
-  `1.4.2-beta1`, `1.4.2-rc1` (`-beta.1` style works too), never `v1.4.2`.
+- **Tags** are bare semver: `1.4.2`, or a pre-release such as `1.4.2-beta1`,
+  never `v1.4.2`.
 - **Build number** (iOS `CURRENT_PROJECT_VERSION`, Android `versionCode`) is
-  derived from the tag only and is strictly monotonic:
-  `MAJOR*1000000 + MINOR*10000 + PATCH*100 + N`, where N orders the builds of
-  one version:
+  not derived from the version. It is `YYYYMMDD*100 + NN`: the UTC date this
+  release was published (its GitHub Release `publishedAt`), and NN (01–99) is
+  its 1-based position among the repository's GitHub Releases published that
+  UTC date, ordered by publishedAt. `create-release.yml` publishes the release
+  before the platform job runs, so the first release on 2026-10-29 builds as
+  `2026102901`, the second as `2026102902`, and the next day starts at
+  `2026103001`. Numbers only grow, and there is no special value for a final
+  release: whatever was released most recently is the one that ships,
+  pre-release or not.
+  - Every run for the same tag, the same day or any later day, recomputes the
+    same number, because releases published after it sort after it. Deleting
+    an earlier release of that date shifts the count down and can repeat a
+    number.
+  - On Android, a rerun after a successful Play upload is rejected by Play for
+    the repeated versionCode.
+  - A 100th release in one UTC date fails.
 
-  | Suffix | N |
-  |---|---|
-  | `-alphaK` / `-alpha.K` | K, 1–30 |
-  | `-betaK` / `-beta.K` | 30+K, 31–60 |
-  | `-rcK` / `-rc.K` | 60+K, 61–98 |
-  | none (final release) | 99 |
-
-  So `1.4.2-beta1` → `1040231`, `1.4.2-rc1` → `1040261`, `1.4.2` →
-  `1040299`, and every later version sorts above all of them. Any other
-  suffix, a K out of range, MINOR or PATCH above 99, or MAJOR above 2099
-  (Play's versionCode ceiling) fails the release job. No build-number tags are
-  pushed and nothing is committed: the release workflow stamps the numbers on
-  the runner only.
-- **A rejected suffix fails after tagging.** `create-release.yml` accepts any
-  semver suffix (it also serves the web sites), so check the suffix before
-  starting a mobile release; an unsupported one leaves a tag and a GitHub
-  Release with no build to delete by hand.
+  No build-number tags are pushed and nothing is committed: the release
+  workflow stamps the numbers on the runner only.
 - **Pre-release** versions (hyphen suffix) go to TestFlight / the Play
   `internal` track only. Stable versions go to App Store Connect (TestFlight;
   review submission stays a manual step) and to the Play track the caller
   names.
-- **iOS marketing version** is the tag's `X.Y.Z` (App Store versions cannot
-  carry a suffix), so the manifest for `1.4.2-beta1` holds `1.4.2`.
+- **Marketing version / versionName** is the tag's `X.Y.Z` on both platforms
+  (App Store versions cannot carry a suffix), so the manifest for
+  `1.4.2-beta1` holds `1.4.2`.
 - **CI** runs on macOS runners, so it never runs on push. Pull requests wait
   at the `approve` job until a reviewer approves the `approval` environment;
   `workflow_dispatch` runs it on any branch. The release workflow always runs
@@ -223,8 +222,8 @@ assemble<Flavor>Debug`) with `gradle-args`. Publishes `check-result`.
 Runs `android-ci.yml` on the tag, then on `ubuntu-24.04` in the `Deploy`
 environment: writes `keystore.properties` from the `UPLOAD_KEYSTORE_*`
 secrets, runs `bundle<Flavor>Release` with
-`-P<version-name-property>=<version>` and
-`-P<version-code-property>=<derived number>` (plus
+`-P<version-name-property>=<X.Y.Z>` and
+`-P<version-code-property>=<YYYYMMDDNN build number>` (plus
 `-P<build-number-property>` when set), uploads to Play with
 `r0adkll/upload-google-play` (`prerelease-track`, default `internal`, for a
 pre-release; `track` otherwise; `release-status`), and attaches
