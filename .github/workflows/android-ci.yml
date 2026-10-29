@@ -1,0 +1,129 @@
+name: Android CI (reusable)
+
+# Unit tests, lint and a debug build of an Android app with Gradle on ubuntu-24.04.
+# Callers run it on pull requests behind the approval gate and on manual dispatch;
+# android-release.yml calls it on the release tag before every bundle.
+#
+# gradle-tasks defaults to test<Flavor>DebugUnitTest lint<Flavor>Debug assemble<Flavor>Debug
+# for the given flavor (no flavor: testDebugUnitTest lintDebug assembleDebug).
+# rust-core-ref is for the We Just Might app: it builds mattas-net/we-just-might-core next to
+# the checkout (../we-just-might-core, the app's wjm.coreDir default) with the core repo's own
+# composite action, using the WJM_CORE_DEPLOY_KEY secret.
+#
+# The job sets the `check-result` workflow output to "success" when it passes, so a caller
+# whose branch ruleset requires a bare check name (e.g. `check`) can keep a thin job of that
+# name that reads it.
+on:
+  workflow_call:
+    inputs:
+      ref:
+        description: Git ref to check out (empty = the ref that triggered the caller).
+        type: string
+        default: ""
+      java-version:
+        description: Temurin JDK version.
+        type: string
+        default: "17"
+      flavor:
+        description: Product flavor for the default task list (empty = no flavors).
+        type: string
+        default: ""
+      gradle-tasks:
+        description: Gradle tasks to run (empty = test/lint/assemble for the flavor's debug variant).
+        type: string
+        default: ""
+      gradle-args:
+        description: Extra Gradle arguments, e.g. -Pkey=value (split on whitespace, no shell expansion).
+        type: string
+        default: ""
+      rust-core-ref:
+        description: We Just Might only. A file holding the we-just-might-core commit SHA (e.g. scripts/core-ref) or the SHA itself. Empty = no Rust core.
+        type: string
+        default: ""
+    secrets:
+      WJM_CORE_DEPLOY_KEY:
+        description: Read-only deploy key for mattas-net/we-just-might-core (rust-core-ref only).
+        required: false
+    outputs:
+      check-result:
+        description: '"success" when the check job passed.'
+        value: ${{ jobs.check.outputs.result }}
+
+permissions:
+  contents: read
+
+# Actions are pinned by commit SHA; the comment names the tag each SHA was resolved from.
+jobs:
+  check:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    outputs:
+      result: ${{ steps.done.outputs.result }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.ref }}
+
+      - name: Set up Java
+        uses: actions/setup-java@c5195efecf7bdfc987ee8bae7a71cb8b11521c00 # v4.7.1
+        with:
+          distribution: temurin
+          java-version: ${{ inputs.java-version }}
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@ac638b010cf58a27ee6c972d7336334ccaf61c96 # v4.4.1
+
+      - name: Resolve the Rust core commit
+        id: core
+        if: inputs.rust-core-ref != ''
+        shell: bash
+        env:
+          CORE_REF: ${{ inputs.rust-core-ref }}
+        run: |
+          set -euo pipefail
+          if [[ "$CORE_REF" =~ ^[0-9a-f]{40}$ ]]; then sha="$CORE_REF"; else sha="$(tr -d '[:space:]' < "$CORE_REF")"; fi
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+
+      - name: Build the Rust core
+        if: inputs.rust-core-ref != ''
+        uses: mattas-net/we-just-might-core/.github/actions/build-android@main
+        with:
+          ref: ${{ steps.core.outputs.sha }}
+          ssh-key: ${{ secrets.WJM_CORE_DEPLOY_KEY }}
+
+      - name: Gradle checks
+        shell: bash
+        env:
+          FLAVOR: ${{ inputs.flavor }}
+          GRADLE_TASKS: ${{ inputs.gradle-tasks }}
+          GRADLE_ARGS: ${{ inputs.gradle-args }}
+        run: |
+          set -euo pipefail
+          if [ -n "$GRADLE_TASKS" ]; then
+            # Split on any whitespace, newlines included, without glob or shell expansion.
+            tasks=(); while read -ra words; do tasks+=(${words[@]+"${words[@]}"}); done <<< "$GRADLE_TASKS"
+          else
+            # BetaDebug for flavor beta, Debug without flavors.
+            cap="$(printf '%s' "${FLAVOR:0:1}" | tr '[:lower:]' '[:upper:]')${FLAVOR:1}Debug"
+            tasks=("test${cap}UnitTest" "lint${cap}" "assemble${cap}")
+          fi
+          # Split on any whitespace, newlines included, without glob or shell expansion.
+          extra=(); while read -ra words; do extra+=(${words[@]+"${words[@]}"}); done <<< "$GRADLE_ARGS"
+          echo "gradlew ${tasks[*]}"
+          ./gradlew --no-daemon ${extra[@]+"${extra[@]}"} "${tasks[@]}"
+
+      - name: Upload test and lint reports
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: reports
+          path: |
+            **/build/reports/
+            **/build/test-results/
+          if-no-files-found: ignore
+          retention-days: 14
+
+      - name: Record result
+        id: done
+        run: echo "result=success" >> "$GITHUB_OUTPUT"

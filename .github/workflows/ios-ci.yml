@@ -1,0 +1,873 @@
+name: Apple CI (reusable)
+
+# Checks for an iOS or macOS app: SwiftPM unit tests, SwiftLint, a compile-only app build,
+# optional Xcode test bundles, and an optional signed archive/export (main only). Every job
+# runs on macos-26, so callers keep this behind a manual dispatch or the PR approval gate;
+# ios-release.yml calls it before every archive, which is the one place it always runs.
+#
+# Jobs and when they run:
+#   test             package-path set        swift test, then test-commands
+#   lint             lint true               pinned, digest-verified SwiftLint
+#   app-build        app-build true          xcodebuild build, signing disabled
+#   app-test         app-test true           xcodebuild test on a simulator (or the Mac)
+#   archive-validate archive-validate true   signed archive + export; only on refs/heads/main
+#
+# Each job sets a `<job>-result` workflow output to "success" when it passes, so a caller
+# whose branch ruleset requires a bare check name (e.g. `test`) can keep a thin job of that
+# name that reads the result.
+#
+# The XcodeGen project (project-dir/project.yml) is generated on the runner; a repo with a
+# checked-in .xcodeproj sets xcodegen: false. rust-core-ref is for the We Just Might apps:
+# it builds mattas-net/we-just-might-core next to the checkout (../we-just-might-core) with
+# the core repo's own composite action, using the WJM_CORE_DEPLOY_KEY secret.
+on:
+  workflow_call:
+    inputs:
+      ref:
+        description: Git ref to check out (empty = the ref that triggered the caller).
+        type: string
+        default: ""
+      platform:
+        description: iOS or macOS. Picks the build/test destinations.
+        type: string
+        default: iOS
+      project-dir:
+        description: Directory holding project.yml / the .xcodeproj, relative to the repo root.
+        type: string
+        default: "."
+      project:
+        description: The .xcodeproj file name inside project-dir (empty = the only one there after generation).
+        type: string
+        default: ""
+      xcodegen:
+        description: Generate the project from project-dir/project.yml with XcodeGen.
+        type: boolean
+        default: true
+      xcodegen-version:
+        description: XcodeGen release to install.
+        type: string
+        default: "2.46.0"
+      xcodegen-sha256:
+        description: SHA-256 of that release's xcodegen.zip.
+        type: string
+        default: 4d9e34b62172d645eed6457cac13fc222569974098ef4ee9c3368bedf0196806
+      xcode-version:
+        description: Xcode to select, e.g. 26.3 (/Applications/Xcode_26.3.app). Empty = runner default.
+        type: string
+        default: ""
+      xcode-version-file:
+        description: Path to a file holding the Xcode version (used when xcode-version is empty).
+        type: string
+        default: ""
+      package-path:
+        description: SwiftPM package directory for `swift test` (empty skips the test job).
+        type: string
+        default: ""
+      swift-test-args:
+        description: Extra arguments for swift test, e.g. --no-parallel.
+        type: string
+        default: ""
+      test-commands:
+        description: Shell run from the repo root after swift test (repo policy scripts).
+        type: string
+        default: ""
+      test-env:
+        description: Newline-separated KEY=VALUE pairs exported in the unsigned jobs (test, app-build, app-test).
+        type: string
+        default: ""
+      lint:
+        description: Run the lint job.
+        type: boolean
+        default: true
+      lint-dir:
+        description: Directory SwiftLint runs from (it picks up .swiftlint.yml there).
+        type: string
+        default: "."
+      lint-args:
+        description: Extra arguments after `swiftlint lint --strict`, e.g. paths or --config.
+        type: string
+        default: ""
+      swiftlint-version:
+        description: SwiftLint release (portable_swiftlint.zip) to install.
+        type: string
+        default: "0.63.3"
+      swiftlint-sha256:
+        description: SHA-256 of that release's portable_swiftlint.zip.
+        type: string
+        default: fb045e85e7cb3374f42a4840b6b85a0106302afa69035c0c6f29af4a44c810b6
+      app-scheme:
+        description: Scheme for the app build and app tests.
+        type: string
+        required: true
+      app-build:
+        description: Run the compile-only app build job.
+        type: boolean
+        default: true
+      app-build-commands:
+        description: Shell run from the repo root after the app build; DERIVED_DATA points at its DerivedData.
+        type: string
+        default: ""
+      app-test:
+        description: Run the Xcode test job (app unit/UI test bundles).
+        type: boolean
+        default: false
+      app-test-args:
+        description: Extra xcodebuild test arguments, e.g. -only-testing:AppTests.
+        type: string
+        default: ""
+      rust-core-ref:
+        description: We Just Might only. A file holding the we-just-might-core commit SHA (e.g. scripts/core-ref) or the SHA itself. Empty = no Rust core.
+        type: string
+        default: ""
+      archive-validate:
+        description: Also archive and export a signed build (only runs on refs/heads/main).
+        type: boolean
+        default: false
+      archive-scheme:
+        description: Scheme to archive (empty = app-scheme).
+        type: string
+        default: ""
+      archive-configuration:
+        description: Build configuration to archive.
+        type: string
+        default: Release
+      export-options:
+        description: ExportOptions.plist path relative to project-dir (archive-validate only).
+        type: string
+        default: ExportOptions.plist
+      bundle-id:
+        description: Expected bundle id of the provisioning profile (empty = not checked).
+        type: string
+        default: ""
+      signing-overrides:
+        description: Pass CODE_SIGN_STYLE/DEVELOPMENT_TEAM/PROVISIONING_PROFILE_SPECIFIER from the installed profile on the archive command line. Leave false when project.yml configures release signing per target.
+        type: boolean
+        default: false
+      google-service-info-plist:
+        description: Repo path to restore GoogleService-Info.plist to from the GOOGLE_SERVICE_INFO_PLIST_BASE64 secret before archiving (empty = none).
+        type: string
+        default: ""
+    secrets:
+      WJM_CORE_DEPLOY_KEY:
+        description: Read-only deploy key for mattas-net/we-just-might-core (rust-core-ref only).
+        required: false
+      DISTRIBUTION_CERT_P12_BASE64:
+        description: Base64 PKCS#12 Apple Distribution certificate (archive-validate only).
+        required: false
+      DISTRIBUTION_CERT_PASSWORD:
+        description: Password for the certificate (archive-validate only).
+        required: false
+      PROVISIONING_PROFILE_BASE64:
+        description: Base64 App Store provisioning profile (archive-validate only).
+        required: false
+      EXTRA_PROVISIONING_PROFILE_BASE64:
+        description: Optional second profile, e.g. for an app extension.
+        required: false
+      GOOGLE_SERVICE_INFO_PLIST_BASE64:
+        description: Base64 GoogleService-Info.plist (google-service-info-plist only).
+        required: false
+    outputs:
+      test-result:
+        description: '"success" when the test job passed.'
+        value: ${{ jobs.test.outputs.result }}
+      lint-result:
+        description: '"success" when the lint job passed.'
+        value: ${{ jobs.lint.outputs.result }}
+      app-build-result:
+        description: '"success" when the app-build job passed.'
+        value: ${{ jobs.app-build.outputs.result }}
+      app-test-result:
+        description: '"success" when the app-test job passed.'
+        value: ${{ jobs.app-test.outputs.result }}
+
+permissions:
+  contents: read
+
+# Actions are pinned by commit SHA; the comment names the tag each SHA was resolved from.
+jobs:
+  test:
+    if: inputs.package-path != ''
+    runs-on: macos-26
+    timeout-minutes: 45
+    outputs:
+      result: ${{ steps.done.outputs.result }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.ref }}
+
+      - name: Export test environment
+        if: inputs.test-env != ''
+        shell: bash
+        env:
+          TEST_ENV: ${{ inputs.test-env }}
+        run: |
+          set -euo pipefail
+          while IFS= read -r line; do
+            [ -z "$line" ] && continue
+            if ! [[ "$line" =~ ^[A-Za-z_][A-Za-z0-9_]*=.*$ ]]; then
+              echo "::error::test-env lines must be KEY=VALUE (got '$line')"
+              exit 1
+            fi
+            echo "$line" >> "$GITHUB_ENV"
+          done <<< "$TEST_ENV"
+
+      - name: Select Xcode
+        shell: bash
+        env:
+          XCODE_VERSION: ${{ inputs.xcode-version }}
+          XCODE_VERSION_FILE: ${{ inputs.xcode-version-file }}
+        run: |
+          set -euo pipefail
+          version="$XCODE_VERSION"
+          if [ -z "$version" ] && [ -n "$XCODE_VERSION_FILE" ]; then
+            version="$(tr -d '[:space:]' < "$XCODE_VERSION_FILE")"
+          fi
+          if [ -n "$version" ]; then
+            app="/Applications/Xcode_${version}.app"
+            if [ ! -d "$app" ]; then
+              echo "::error::$app is not on this runner. Available:"
+              ls -d /Applications/Xcode*.app
+              exit 1
+            fi
+            sudo xcode-select -s "$app"
+          fi
+          xcodebuild -version
+
+      - name: Resolve the Rust core commit
+        id: core
+        if: inputs.rust-core-ref != ''
+        shell: bash
+        env:
+          CORE_REF: ${{ inputs.rust-core-ref }}
+        run: |
+          set -euo pipefail
+          if [[ "$CORE_REF" =~ ^[0-9a-f]{40}$ ]]; then sha="$CORE_REF"; else sha="$(tr -d '[:space:]' < "$CORE_REF")"; fi
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+
+      - name: Build the Rust core
+        if: inputs.rust-core-ref != ''
+        uses: mattas-net/we-just-might-core/.github/actions/build-ios@main
+        with:
+          ref: ${{ steps.core.outputs.sha }}
+          ssh-key: ${{ secrets.WJM_CORE_DEPLOY_KEY }}
+
+      - name: Resolve Swift toolchain version
+        id: swift
+        shell: bash
+        run: echo "version=$(swift --version 2>&1 | head -n 1 | tr -c 'A-Za-z0-9.\n' '-')" >> "$GITHUB_OUTPUT"
+
+      - name: Cache SwiftPM build
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ${{ inputs.package-path }}/.build
+          key: swiftpm-build-${{ runner.os }}-${{ steps.swift.outputs.version }}-${{ hashFiles(format('{0}/Package.swift', inputs.package-path), format('{0}/Package.resolved', inputs.package-path), inputs.rust-core-ref != '' && inputs.rust-core-ref || 'no-core') }}
+          restore-keys: |
+            swiftpm-build-${{ runner.os }}-${{ steps.swift.outputs.version }}-
+
+      - name: swift test
+        shell: bash
+        env:
+          PACKAGE_PATH: ${{ inputs.package-path }}
+          SWIFT_TEST_ARGS: ${{ inputs.swift-test-args }}
+        run: |
+          set -euo pipefail
+          # Split on any whitespace, newlines included, without glob or shell expansion.
+          extra=(); while read -ra words; do extra+=(${words[@]+"${words[@]}"}); done <<< "$SWIFT_TEST_ARGS"
+          # swift test's own exit status is the gate; the filtered output is display only.
+          set +e
+          swift test --package-path "$PACKAGE_PATH" ${extra[@]+"${extra[@]}"} >"$RUNNER_TEMP/swift-test.log" 2>&1
+          status=$?
+          set -e
+          grep -E 'error:|✘|Test run with|Executed' "$RUNNER_TEMP/swift-test.log" || true
+          if [ "$status" -ne 0 ]; then
+            echo "swift test exited $status" >&2
+            tail -n 200 "$RUNNER_TEMP/swift-test.log" >&2
+            exit "$status"
+          fi
+
+      - name: Repository test commands
+        if: inputs.test-commands != ''
+        shell: bash
+        env:
+          TEST_COMMANDS: ${{ inputs.test-commands }}
+        run: bash -euo pipefail -c "$TEST_COMMANDS"
+
+      - name: Record result
+        id: done
+        run: echo "result=success" >> "$GITHUB_OUTPUT"
+
+  lint:
+    if: inputs.lint
+    runs-on: macos-26
+    timeout-minutes: 15
+    outputs:
+      result: ${{ steps.done.outputs.result }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.ref }}
+
+      # The release asset is immutable, but the URL is not a trust boundary on its own:
+      # verify the pinned SHA-256 before executing it.
+      - name: Install SwiftLint (pinned, digest-verified)
+        shell: bash
+        env:
+          SWIFTLINT_VERSION: ${{ inputs.swiftlint-version }}
+          SWIFTLINT_SHA256: ${{ inputs.swiftlint-sha256 }}
+        run: |
+          set -euo pipefail
+          curl -fsSL -o "$RUNNER_TEMP/swiftlint.zip" \
+            "https://github.com/realm/SwiftLint/releases/download/$SWIFTLINT_VERSION/portable_swiftlint.zip"
+          echo "$SWIFTLINT_SHA256  $RUNNER_TEMP/swiftlint.zip" | shasum -a 256 -c -
+          unzip -q -o "$RUNNER_TEMP/swiftlint.zip" -d "$RUNNER_TEMP/swiftlint"
+          "$RUNNER_TEMP/swiftlint/swiftlint" version
+
+      - name: SwiftLint
+        shell: bash
+        env:
+          LINT_DIR: ${{ inputs.lint-dir }}
+          LINT_ARGS: ${{ inputs.lint-args }}
+        run: |
+          set -euo pipefail
+          # Split on any whitespace, newlines included, without glob or shell expansion.
+          extra=(); while read -ra words; do extra+=(${words[@]+"${words[@]}"}); done <<< "$LINT_ARGS"
+          cd "$LINT_DIR"
+          "$RUNNER_TEMP/swiftlint/swiftlint" lint --strict ${extra[@]+"${extra[@]}"}
+
+      - name: Record result
+        id: done
+        run: echo "result=success" >> "$GITHUB_OUTPUT"
+
+  # Compile-only build of the app target (an app target is not covered by `swift test`).
+  app-build:
+    if: inputs.app-build
+    runs-on: macos-26
+    timeout-minutes: 60
+    outputs:
+      result: ${{ steps.done.outputs.result }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.ref }}
+
+      - name: Export test environment
+        if: inputs.test-env != ''
+        shell: bash
+        env:
+          TEST_ENV: ${{ inputs.test-env }}
+        run: |
+          set -euo pipefail
+          while IFS= read -r line; do
+            [ -z "$line" ] && continue
+            if ! [[ "$line" =~ ^[A-Za-z_][A-Za-z0-9_]*=.*$ ]]; then
+              echo "::error::test-env lines must be KEY=VALUE (got '$line')"
+              exit 1
+            fi
+            echo "$line" >> "$GITHUB_ENV"
+          done <<< "$TEST_ENV"
+
+      - name: Select Xcode
+        shell: bash
+        env:
+          XCODE_VERSION: ${{ inputs.xcode-version }}
+          XCODE_VERSION_FILE: ${{ inputs.xcode-version-file }}
+        run: |
+          set -euo pipefail
+          version="$XCODE_VERSION"
+          if [ -z "$version" ] && [ -n "$XCODE_VERSION_FILE" ]; then
+            version="$(tr -d '[:space:]' < "$XCODE_VERSION_FILE")"
+          fi
+          if [ -n "$version" ]; then
+            app="/Applications/Xcode_${version}.app"
+            if [ ! -d "$app" ]; then
+              echo "::error::$app is not on this runner. Available:"
+              ls -d /Applications/Xcode*.app
+              exit 1
+            fi
+            sudo xcode-select -s "$app"
+          fi
+          xcodebuild -version
+
+      - name: Resolve the Rust core commit
+        id: core
+        if: inputs.rust-core-ref != ''
+        shell: bash
+        env:
+          CORE_REF: ${{ inputs.rust-core-ref }}
+        run: |
+          set -euo pipefail
+          if [[ "$CORE_REF" =~ ^[0-9a-f]{40}$ ]]; then sha="$CORE_REF"; else sha="$(tr -d '[:space:]' < "$CORE_REF")"; fi
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+
+      - name: Build the Rust core
+        if: inputs.rust-core-ref != ''
+        uses: mattas-net/we-just-might-core/.github/actions/build-ios@main
+        with:
+          ref: ${{ steps.core.outputs.sha }}
+          ssh-key: ${{ secrets.WJM_CORE_DEPLOY_KEY }}
+
+      - name: Install XcodeGen (pinned, digest-verified)
+        if: inputs.xcodegen
+        shell: bash
+        env:
+          XCODEGEN_VERSION: ${{ inputs.xcodegen-version }}
+          XCODEGEN_SHA256: ${{ inputs.xcodegen-sha256 }}
+        run: |
+          set -euo pipefail
+          curl -fsSL -o "$RUNNER_TEMP/xcodegen.zip" \
+            "https://github.com/yonaskolb/XcodeGen/releases/download/$XCODEGEN_VERSION/xcodegen.zip"
+          echo "$XCODEGEN_SHA256  $RUNNER_TEMP/xcodegen.zip" | shasum -a 256 -c -
+          unzip -q -o "$RUNNER_TEMP/xcodegen.zip" -d "$RUNNER_TEMP"
+          echo "$RUNNER_TEMP/xcodegen/bin" >> "$GITHUB_PATH"
+
+      - name: Generate the Xcode project
+        if: inputs.xcodegen
+        working-directory: ${{ inputs.project-dir }}
+        run: xcodegen generate
+
+      - name: Resolve the Xcode project
+        shell: bash
+        working-directory: ${{ inputs.project-dir }}
+        env:
+          PROJECT: ${{ inputs.project }}
+        run: |
+          set -euo pipefail
+          if [ -z "$PROJECT" ]; then
+            shopt -s nullglob
+            found=(*.xcodeproj)
+            if [ "${#found[@]}" -ne 1 ]; then
+              echo "::error::expected one .xcodeproj in $PWD, found ${#found[@]}; set the project input"
+              exit 1
+            fi
+            PROJECT="${found[0]}"
+          fi
+          test -d "$PROJECT"
+          echo "XCODE_PROJECT=$PROJECT" >> "$GITHUB_ENV"
+
+      - name: Resolve Xcode version
+        id: xcode
+        shell: bash
+        run: echo "version=$(xcodebuild -version | tr -c 'A-Za-z0-9.\n' '-' | tr '\n' '_')" >> "$GITHUB_OUTPUT"
+
+      - name: Cache resolved SwiftPM packages
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ${{ runner.temp }}/DerivedData/SourcePackages
+          key: swiftpm-app-${{ runner.os }}-${{ steps.xcode.outputs.version }}-${{ hashFiles(format('{0}/project.yml', inputs.project-dir), format('{0}/**/Package.resolved', inputs.project-dir), format('{0}/**/Package.swift', inputs.project-dir)) }}
+
+      - name: Build the app (compile-only, no signing)
+        shell: bash
+        working-directory: ${{ inputs.project-dir }}
+        env:
+          SCHEME: ${{ inputs.app-scheme }}
+          PLATFORM: ${{ inputs.platform }}
+        run: |
+          set -euo pipefail
+          if [ "$PLATFORM" = "macOS" ]; then destination='platform=macOS'; else destination='generic/platform=iOS Simulator'; fi
+          # xcodebuild's own exit status is the gate; the filtered pipeline is display only.
+          set +e
+          xcodebuild build \
+            -project "$XCODE_PROJECT" \
+            -scheme "$SCHEME" \
+            -configuration Debug \
+            -destination "$destination" \
+            -derivedDataPath "$RUNNER_TEMP/DerivedData" \
+            -skipPackagePluginValidation \
+            CODE_SIGNING_ALLOWED=NO \
+            > "$RUNNER_TEMP/xcodebuild.log" 2>&1
+          status=$?
+          set -e
+          grep -E 'error:|warning:|BUILD (SUCCEEDED|FAILED)' "$RUNNER_TEMP/xcodebuild.log" || true
+          if [ "$status" -ne 0 ]; then
+            echo "xcodebuild exited $status" >&2
+            tail -n 100 "$RUNNER_TEMP/xcodebuild.log" >&2
+            exit "$status"
+          fi
+
+      - name: Repository app-build commands
+        if: inputs.app-build-commands != ''
+        shell: bash
+        env:
+          APP_BUILD_COMMANDS: ${{ inputs.app-build-commands }}
+        run: |
+          export DERIVED_DATA="$RUNNER_TEMP/DerivedData"
+          bash -euo pipefail -c "$APP_BUILD_COMMANDS"
+
+      - name: Record result
+        id: done
+        run: echo "result=success" >> "$GITHUB_OUTPUT"
+
+  # Xcode test bundles that `swift test` cannot reach (app-target unit tests, UI tests).
+  app-test:
+    if: inputs.app-test
+    runs-on: macos-26
+    timeout-minutes: 75
+    outputs:
+      result: ${{ steps.done.outputs.result }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.ref }}
+
+      - name: Export test environment
+        if: inputs.test-env != ''
+        shell: bash
+        env:
+          TEST_ENV: ${{ inputs.test-env }}
+        run: |
+          set -euo pipefail
+          while IFS= read -r line; do
+            [ -z "$line" ] && continue
+            if ! [[ "$line" =~ ^[A-Za-z_][A-Za-z0-9_]*=.*$ ]]; then
+              echo "::error::test-env lines must be KEY=VALUE (got '$line')"
+              exit 1
+            fi
+            echo "$line" >> "$GITHUB_ENV"
+          done <<< "$TEST_ENV"
+
+      - name: Select Xcode
+        shell: bash
+        env:
+          XCODE_VERSION: ${{ inputs.xcode-version }}
+          XCODE_VERSION_FILE: ${{ inputs.xcode-version-file }}
+        run: |
+          set -euo pipefail
+          version="$XCODE_VERSION"
+          if [ -z "$version" ] && [ -n "$XCODE_VERSION_FILE" ]; then
+            version="$(tr -d '[:space:]' < "$XCODE_VERSION_FILE")"
+          fi
+          if [ -n "$version" ]; then
+            app="/Applications/Xcode_${version}.app"
+            if [ ! -d "$app" ]; then
+              echo "::error::$app is not on this runner. Available:"
+              ls -d /Applications/Xcode*.app
+              exit 1
+            fi
+            sudo xcode-select -s "$app"
+          fi
+          xcodebuild -version
+
+      - name: Resolve the Rust core commit
+        id: core
+        if: inputs.rust-core-ref != ''
+        shell: bash
+        env:
+          CORE_REF: ${{ inputs.rust-core-ref }}
+        run: |
+          set -euo pipefail
+          if [[ "$CORE_REF" =~ ^[0-9a-f]{40}$ ]]; then sha="$CORE_REF"; else sha="$(tr -d '[:space:]' < "$CORE_REF")"; fi
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+
+      - name: Build the Rust core
+        if: inputs.rust-core-ref != ''
+        uses: mattas-net/we-just-might-core/.github/actions/build-ios@main
+        with:
+          ref: ${{ steps.core.outputs.sha }}
+          ssh-key: ${{ secrets.WJM_CORE_DEPLOY_KEY }}
+
+      - name: Install XcodeGen (pinned, digest-verified)
+        if: inputs.xcodegen
+        shell: bash
+        env:
+          XCODEGEN_VERSION: ${{ inputs.xcodegen-version }}
+          XCODEGEN_SHA256: ${{ inputs.xcodegen-sha256 }}
+        run: |
+          set -euo pipefail
+          curl -fsSL -o "$RUNNER_TEMP/xcodegen.zip" \
+            "https://github.com/yonaskolb/XcodeGen/releases/download/$XCODEGEN_VERSION/xcodegen.zip"
+          echo "$XCODEGEN_SHA256  $RUNNER_TEMP/xcodegen.zip" | shasum -a 256 -c -
+          unzip -q -o "$RUNNER_TEMP/xcodegen.zip" -d "$RUNNER_TEMP"
+          echo "$RUNNER_TEMP/xcodegen/bin" >> "$GITHUB_PATH"
+
+      - name: Generate the Xcode project
+        if: inputs.xcodegen
+        working-directory: ${{ inputs.project-dir }}
+        run: xcodegen generate
+
+      - name: Resolve the Xcode project
+        shell: bash
+        working-directory: ${{ inputs.project-dir }}
+        env:
+          PROJECT: ${{ inputs.project }}
+        run: |
+          set -euo pipefail
+          if [ -z "$PROJECT" ]; then
+            shopt -s nullglob
+            found=(*.xcodeproj)
+            if [ "${#found[@]}" -ne 1 ]; then
+              echo "::error::expected one .xcodeproj in $PWD, found ${#found[@]}; set the project input"
+              exit 1
+            fi
+            PROJECT="${found[0]}"
+          fi
+          test -d "$PROJECT"
+          echo "XCODE_PROJECT=$PROJECT" >> "$GITHUB_ENV"
+
+      - name: Run the Xcode tests
+        shell: bash
+        working-directory: ${{ inputs.project-dir }}
+        env:
+          SCHEME: ${{ inputs.app-scheme }}
+          PLATFORM: ${{ inputs.platform }}
+          APP_TEST_ARGS: ${{ inputs.app-test-args }}
+        run: |
+          set -euo pipefail
+          # Split on any whitespace, newlines included, without glob or shell expansion.
+          extra=(); while read -ra words; do extra+=(${words[@]+"${words[@]}"}); done <<< "$APP_TEST_ARGS"
+          if [ "$PLATFORM" = "macOS" ]; then
+            destination='platform=macOS'
+          else
+            # Resolve a concrete available iPhone simulator (newest runtime) rather than
+            # trusting a hard-coded device name to exist on the runner image.
+            device_id="$(xcrun simctl list devices available --json | python3 -c "import json,sys; d=json.load(sys.stdin)['devices']; print(next(x['udid'] for r in sorted(d, reverse=True) if 'iOS' in r for x in d[r] if x.get('isAvailable') and x['name'].startswith('iPhone')))")"
+            destination="platform=iOS Simulator,id=$device_id"
+          fi
+          echo "Testing on $destination"
+          # xcodebuild's own exit status is the gate; the filtered output is display only.
+          set +e
+          xcodebuild test \
+            -project "$XCODE_PROJECT" \
+            -scheme "$SCHEME" \
+            -configuration Debug \
+            -destination "$destination" \
+            -derivedDataPath "$RUNNER_TEMP/DerivedDataTests" \
+            -skipPackagePluginValidation \
+            CODE_SIGNING_ALLOWED=NO \
+            ${extra[@]+"${extra[@]}"} \
+            > "$RUNNER_TEMP/xcodebuild-test.log" 2>&1
+          status=$?
+          set -e
+          grep -E 'error:|failed|Executed .* tests' "$RUNNER_TEMP/xcodebuild-test.log" || true
+          if [ "$status" -ne 0 ]; then
+            echo "xcodebuild test exited $status" >&2
+            tail -n 200 "$RUNNER_TEMP/xcodebuild-test.log" >&2
+            exit "$status"
+          fi
+
+      - name: Record result
+        id: done
+        run: echo "result=success" >> "$GITHUB_OUTPUT"
+
+  # Signed archive + export, opt-in. The job hands the distribution certificate to a build
+  # of the checked-out code; on any branch but main, whoever can push to that branch controls
+  # that code and could exfiltrate the signing material, so it only runs on main.
+  archive-validate:
+    needs: [test, lint, app-build]
+    # always() so a skipped (not configured) check job does not skip this one; a failed one does.
+    if: >-
+      always() && inputs.archive-validate && github.ref == 'refs/heads/main'
+      && !contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled')
+    runs-on: macos-26
+    timeout-minutes: 90
+    steps:
+      # Defence in depth: fail before checkout if the job-level guard is ever loosened.
+      - name: Require main
+        shell: bash
+        run: |
+          if [ "$GITHUB_REF" != "refs/heads/main" ]; then
+            echo "::error::archive-validate uses signing secrets and may only run on main (got $GITHUB_REF)."
+            exit 1
+          fi
+
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.ref }}
+
+      - name: Select Xcode
+        shell: bash
+        env:
+          XCODE_VERSION: ${{ inputs.xcode-version }}
+          XCODE_VERSION_FILE: ${{ inputs.xcode-version-file }}
+        run: |
+          set -euo pipefail
+          version="$XCODE_VERSION"
+          if [ -z "$version" ] && [ -n "$XCODE_VERSION_FILE" ]; then
+            version="$(tr -d '[:space:]' < "$XCODE_VERSION_FILE")"
+          fi
+          if [ -n "$version" ]; then
+            app="/Applications/Xcode_${version}.app"
+            if [ ! -d "$app" ]; then
+              echo "::error::$app is not on this runner. Available:"
+              ls -d /Applications/Xcode*.app
+              exit 1
+            fi
+            sudo xcode-select -s "$app"
+          fi
+          xcodebuild -version
+
+      # Every downloaded tool is installed and digest-verified before any secret is
+      # materialized, so no tool download can observe the signing material.
+      - name: Install XcodeGen (pinned, digest-verified)
+        if: inputs.xcodegen
+        shell: bash
+        env:
+          XCODEGEN_VERSION: ${{ inputs.xcodegen-version }}
+          XCODEGEN_SHA256: ${{ inputs.xcodegen-sha256 }}
+        run: |
+          set -euo pipefail
+          curl -fsSL -o "$RUNNER_TEMP/xcodegen.zip" \
+            "https://github.com/yonaskolb/XcodeGen/releases/download/$XCODEGEN_VERSION/xcodegen.zip"
+          echo "$XCODEGEN_SHA256  $RUNNER_TEMP/xcodegen.zip" | shasum -a 256 -c -
+          unzip -q -o "$RUNNER_TEMP/xcodegen.zip" -d "$RUNNER_TEMP"
+          echo "$RUNNER_TEMP/xcodegen/bin" >> "$GITHUB_PATH"
+
+      - name: Resolve the Rust core commit
+        id: core
+        if: inputs.rust-core-ref != ''
+        shell: bash
+        env:
+          CORE_REF: ${{ inputs.rust-core-ref }}
+        run: |
+          set -euo pipefail
+          if [[ "$CORE_REF" =~ ^[0-9a-f]{40}$ ]]; then sha="$CORE_REF"; else sha="$(tr -d '[:space:]' < "$CORE_REF")"; fi
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+
+      # Signed: no cached core build output in the archive.
+      - name: Build the Rust core
+        if: inputs.rust-core-ref != ''
+        uses: mattas-net/we-just-might-core/.github/actions/build-ios@main
+        with:
+          ref: ${{ steps.core.outputs.sha }}
+          ssh-key: ${{ secrets.WJM_CORE_DEPLOY_KEY }}
+          cache-target: "false"
+
+      - name: Generate the Xcode project
+        if: inputs.xcodegen
+        working-directory: ${{ inputs.project-dir }}
+        run: xcodegen generate
+
+      - name: Resolve the Xcode project
+        shell: bash
+        working-directory: ${{ inputs.project-dir }}
+        env:
+          PROJECT: ${{ inputs.project }}
+        run: |
+          set -euo pipefail
+          if [ -z "$PROJECT" ]; then
+            shopt -s nullglob
+            found=(*.xcodeproj)
+            if [ "${#found[@]}" -ne 1 ]; then
+              echo "::error::expected one .xcodeproj in $PWD, found ${#found[@]}; set the project input"
+              exit 1
+            fi
+            PROJECT="${found[0]}"
+          fi
+          test -d "$PROJECT"
+          echo "XCODE_PROJECT=$PROJECT" >> "$GITHUB_ENV"
+
+      - name: Restore GoogleService-Info.plist
+        if: inputs.google-service-info-plist != ''
+        shell: bash
+        env:
+          PLIST_BASE64: ${{ secrets.GOOGLE_SERVICE_INFO_PLIST_BASE64 }}
+          PLIST_PATH: ${{ inputs.google-service-info-plist }}
+        run: |
+          set -euo pipefail
+          if [ -z "$PLIST_BASE64" ]; then
+            echo "::error::GOOGLE_SERVICE_INFO_PLIST_BASE64 is not set"
+            exit 1
+          fi
+          mkdir -p "$(dirname "$PLIST_PATH")"
+          printf '%s' "$PLIST_BASE64" | base64 --decode > "$PLIST_PATH"
+          plutil -lint "$PLIST_PATH"
+
+      - name: Install signing assets
+        uses: mattas-net/.github/.github/actions/apple-signing@main
+        with:
+          certificate-p12-base64: ${{ secrets.DISTRIBUTION_CERT_P12_BASE64 }}
+          certificate-password: ${{ secrets.DISTRIBUTION_CERT_PASSWORD }}
+          profile-base64: ${{ secrets.PROVISIONING_PROFILE_BASE64 }}
+          extra-profile-base64: ${{ secrets.EXTRA_PROVISIONING_PROFILE_BASE64 }}
+          bundle-id: ${{ inputs.bundle-id }}
+
+      # Fill a runner-temporary copy of the export options from the installed profiles.
+      - name: Prepare export options
+        shell: bash
+        env:
+          EXPORT_OPTIONS: ${{ inputs.project-dir }}/${{ inputs.export-options }}
+        run: |
+          set -euo pipefail
+          python3 - "$EXPORT_OPTIONS" "$RUNNER_TEMP/ExportOptions.plist" "$RUNNER_TEMP/UploadOptions.plist" "$SIGNING_TEAM_ID" "$SIGNING_PROFILES_TSV" <<'PY'
+          import plistlib, sys
+          from pathlib import Path
+          source, export_path, upload_path, team_id, tsv = sys.argv[1:6]
+          options = plistlib.loads(Path(source).read_bytes())
+          options["teamID"] = team_id
+          profiles = dict(options.get("provisioningProfiles") or {})
+          for line in Path(tsv).read_text().splitlines():
+              if line.strip():
+                  bundle_id, name = line.split("\t", 1)
+                  profiles[bundle_id] = name
+          options["provisioningProfiles"] = profiles
+          options["destination"] = "export"
+          Path(export_path).write_bytes(plistlib.dumps(options))
+          Path(upload_path).write_bytes(plistlib.dumps(dict(options, destination="upload")))
+          PY
+
+      - name: Archive
+        shell: bash
+        working-directory: ${{ inputs.project-dir }}
+        env:
+          SCHEME: ${{ inputs.archive-scheme != '' && inputs.archive-scheme || inputs.app-scheme }}
+          CONFIGURATION: ${{ inputs.archive-configuration }}
+          SIGNING_OVERRIDES: ${{ inputs.signing-overrides }}
+          PLATFORM: ${{ inputs.platform }}
+        run: |
+          set -euo pipefail
+          overrides=()
+          if [ "$SIGNING_OVERRIDES" = "true" ]; then
+            overrides=(CODE_SIGN_STYLE=Manual "DEVELOPMENT_TEAM=$SIGNING_TEAM_ID" "PROVISIONING_PROFILE_SPECIFIER=$SIGNING_PROFILE_NAME")
+          fi
+          if [ "$PLATFORM" = "macOS" ]; then destination='generic/platform=macOS'; else destination='generic/platform=iOS'; fi
+          set +e
+          xcodebuild archive \
+            -project "$XCODE_PROJECT" \
+            -scheme "$SCHEME" \
+            -configuration "$CONFIGURATION" \
+            -destination "$destination" \
+            -archivePath "$RUNNER_TEMP/App.xcarchive" \
+            -skipPackagePluginValidation \
+            ${overrides[@]+"${overrides[@]}"} \
+            > "$RUNNER_TEMP/archive.log" 2>&1
+          status=$?
+          set -e
+          grep -E 'error:|ARCHIVE (SUCCEEDED|FAILED)' "$RUNNER_TEMP/archive.log" || true
+          if [ "$status" -ne 0 ]; then tail -n 100 "$RUNNER_TEMP/archive.log" >&2; exit "$status"; fi
+
+      - name: Export
+        shell: bash
+        run: |
+          set -euo pipefail
+          xcodebuild -exportArchive \
+            -archivePath "$RUNNER_TEMP/App.xcarchive" \
+            -exportPath "$RUNNER_TEMP/export" \
+            -exportOptionsPlist "$RUNNER_TEMP/ExportOptions.plist" \
+            > "$RUNNER_TEMP/export.log" 2>&1 || { tail -n 100 "$RUNNER_TEMP/export.log" >&2; exit 1; }
+          ls -l "$RUNNER_TEMP/export"
+
+      - name: Upload archive diagnostics on failure
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: archive-validate-diagnostics
+          path: |
+            ${{ runner.temp }}/archive.log
+            ${{ runner.temp }}/export.log
+          if-no-files-found: ignore
+          retention-days: 7
+
+      - name: Remove temporary signing assets
+        if: always()
+        shell: bash
+        run: |
+          if [ -n "${SIGNING_PROFILE_PATHS:-}" ]; then
+            while IFS= read -r p; do [ -n "$p" ] && rm -f "$p"; done <<< "$SIGNING_PROFILE_PATHS"
+          fi
+          if [ -n "${SIGNING_KEYCHAIN_PATH:-}" ]; then security delete-keychain "$SIGNING_KEYCHAIN_PATH" || true; fi
+          rm -f "${SIGNING_PROFILES_TSV:-}"

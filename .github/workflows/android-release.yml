@@ -1,0 +1,369 @@
+name: Android Release (reusable)
+
+# Builds the release that create-release.yml just tagged and ships it to Google Play.
+# The caller's release.yml chains it after create-release.yml (needs: release) with
+# `version` set to the new tag. This workflow:
+#   1. runs android-ci.yml on the tag (verify: true);
+#   2. derives versionCode from the tag: MAJOR*10000 + MINOR*100 + PATCH
+#      (1.4.2 -> 10402; a pre-release suffix is ignored, so 1.4.2-beta1 -> 10402);
+#   3. builds the signed bundle with versionName = the tag, versionCode = that number, passed
+#      as Gradle properties (never committed), signed through keystore.properties from the
+#      UPLOAD_KEYSTORE_* secrets;
+#   4. uploads it to Play: pre-release versions (hyphen suffix) to `prerelease-track`
+#      (internal), everything else to `track`;
+#   5. attaches the AAB (and the R8 mapping, when there is one) to the GitHub Release.
+#
+# Secrets (pass with `secrets: inherit`): UPLOAD_KEYSTORE_BASE64, UPLOAD_KEYSTORE_PASSWORD,
+# UPLOAD_KEY_ALIAS, UPLOAD_KEY_PASSWORD, PLAY_SERVICE_ACCOUNT_JSON, plus WJM_CORE_DEPLOY_KEY
+# (rust-core-ref) and GOOGLE_SERVICES_JSON_BASE64 (google-services-json) where used.
+on:
+  workflow_call:
+    inputs:
+      version:
+        description: The release tag to build (bare semver, e.g. 1.4.2 or 1.4.2-beta1).
+        type: string
+        required: true
+      environment:
+        description: Deployment environment for the upload job (its secrets and protection rules apply).
+        type: string
+        default: Deploy
+      verify:
+        description: Run android-ci.yml on the tag before bundling.
+        type: boolean
+        default: true
+      package-name:
+        description: Play application id, e.g. net.mattas.law18.
+        type: string
+        required: true
+      track:
+        description: Play track for stable versions. internal keeps promotion to production a manual Play Console step.
+        type: string
+        default: production
+      prerelease-track:
+        description: Play track for pre-release versions.
+        type: string
+        default: internal
+      release-status:
+        description: Play release status (completed, draft, inProgress, halted). An app that has never been published needs draft.
+        type: string
+        default: completed
+      module:
+        description: Gradle application module.
+        type: string
+        default: app
+      flavor:
+        description: Product flavor to bundle (empty = no flavors); the task is bundle<Flavor>Release.
+        type: string
+        default: ""
+      java-version:
+        description: Temurin JDK version.
+        type: string
+        default: "17"
+      version-name-property:
+        description: Gradle property the build reads versionName from (e.g. wjm.versionName).
+        type: string
+        default: versionName
+      version-code-property:
+        description: Gradle property the build reads versionCode from (e.g. wjm.versionCode).
+        type: string
+        default: versionCode
+      build-number-property:
+        description: Optional Gradle property that also receives the derived number (e.g. wjm.buildNumber, the iOS CFBundleVersion twin).
+        type: string
+        default: ""
+      gradle-args:
+        description: Extra Gradle arguments for the CI run and the bundle, split on whitespace (no shell expansion).
+        type: string
+        default: ""
+      google-services-json:
+        description: Repo path to restore google-services.json to from GOOGLE_SERVICES_JSON_BASE64 (empty = none).
+        type: string
+        default: ""
+      gradle-tasks:
+        description: android-ci gradle-tasks.
+        type: string
+        default: ""
+      ci-flavor:
+        description: android-ci flavor (empty = flavor).
+        type: string
+        default: ""
+      rust-core-ref:
+        description: We Just Might only. File holding the we-just-might-core SHA, or the SHA.
+        type: string
+        default: ""
+    secrets:
+      UPLOAD_KEYSTORE_BASE64:
+        description: Base64 upload keystore (.jks).
+        required: true
+      UPLOAD_KEYSTORE_PASSWORD:
+        description: Keystore password.
+        required: true
+      UPLOAD_KEY_ALIAS:
+        description: Upload key alias.
+        required: true
+      UPLOAD_KEY_PASSWORD:
+        description: Upload key password.
+        required: true
+      PLAY_SERVICE_ACCOUNT_JSON:
+        description: Google Play service account JSON key (plain text).
+        required: true
+      WJM_CORE_DEPLOY_KEY:
+        description: Read-only deploy key for mattas-net/we-just-might-core (rust-core-ref only).
+        required: false
+      GOOGLE_SERVICES_JSON_BASE64:
+        description: Base64 google-services.json (google-services-json only).
+        required: false
+
+permissions:
+  contents: read
+
+# Actions are pinned by commit SHA; the comment names the tag each SHA was resolved from.
+jobs:
+  ci:
+    if: inputs.verify
+    uses: mattas-net/.github/.github/workflows/android-ci.yml@main
+    permissions:
+      contents: read
+    secrets: inherit
+    with:
+      ref: ${{ inputs.version }}
+      java-version: ${{ inputs.java-version }}
+      flavor: ${{ inputs.ci-flavor != '' && inputs.ci-flavor || inputs.flavor }}
+      gradle-tasks: ${{ inputs.gradle-tasks }}
+      gradle-args: ${{ inputs.gradle-args }}
+      rust-core-ref: ${{ inputs.rust-core-ref }}
+
+  google-play:
+    needs: ci
+    # always() lets the job run when verify is false (ci skipped); a failed ci blocks it.
+    if: always() && needs.ci.result != 'failure' && needs.ci.result != 'cancelled'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 75
+    environment: ${{ inputs.environment }}
+    concurrency:
+      group: deploy-google-play-${{ github.repository }}
+      cancel-in-progress: false
+    permissions:
+      contents: write # attach the AAB to the GitHub Release
+
+    steps:
+      - name: Derive versionCode and Play track
+        id: version
+        shell: bash
+        env:
+          VERSION: ${{ inputs.version }}
+          TRACK: ${{ inputs.track }}
+          PRERELEASE_TRACK: ${{ inputs.prerelease-track }}
+          FLAVOR: ${{ inputs.flavor }}
+        run: |
+          set -euo pipefail
+          if ! [[ "$VERSION" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z.]+)?$ ]]; then
+            echo "::error::'$VERSION' is not bare semver (X.Y.Z or X.Y.Z-suffix; no v prefix)"
+            exit 1
+          fi
+          major="${BASH_REMATCH[1]}"; minor="${BASH_REMATCH[2]}"; patch="${BASH_REMATCH[3]}"
+          if [ "$minor" -gt 99 ] || [ "$patch" -gt 99 ]; then
+            echo "::error::MINOR and PATCH must be <= 99 for the MAJOR*10000+MINOR*100+PATCH versionCode"
+            exit 1
+          fi
+          code=$(( major * 10000 + minor * 100 + patch ))
+          if [[ "$VERSION" == *-* ]]; then
+            prerelease=true; track="$PRERELEASE_TRACK"
+          else
+            prerelease=false; track="$TRACK"
+          fi
+          # Variant directory productionRelease / task bundleProductionRelease, or
+          # release / bundleRelease without flavors.
+          first="$(printf '%s' "${FLAVOR:0:1}" | tr '[:upper:]' '[:lower:]')"
+          upper="$(printf '%s' "${FLAVOR:0:1}" | tr '[:lower:]' '[:upper:]')"
+          if [ -n "$FLAVOR" ]; then
+            variant="${first}${FLAVOR:1}Release"; task="bundle${upper}${FLAVOR:1}Release"
+          else
+            variant=release; task=bundleRelease
+          fi
+          {
+            echo "code=$code"
+            echo "prerelease=$prerelease"
+            echo "track=$track"
+            echo "task=$task"
+            echo "variant=$variant"
+          } >> "$GITHUB_OUTPUT"
+          echo "Version $VERSION -> versionCode $code, Play track $track"
+
+      - name: Checkout the release tag
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.version }}
+
+      - name: Set up Java
+        uses: actions/setup-java@c5195efecf7bdfc987ee8bae7a71cb8b11521c00 # v4.7.1
+        with:
+          distribution: temurin
+          java-version: ${{ inputs.java-version }}
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@ac638b010cf58a27ee6c972d7336334ccaf61c96 # v4.4.1
+
+      - name: Resolve the Rust core commit
+        id: core
+        if: inputs.rust-core-ref != ''
+        shell: bash
+        env:
+          CORE_REF: ${{ inputs.rust-core-ref }}
+        run: |
+          set -euo pipefail
+          if [[ "$CORE_REF" =~ ^[0-9a-f]{40}$ ]]; then sha="$CORE_REF"; else sha="$(tr -d '[:space:]' < "$CORE_REF")"; fi
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+
+      # A signed bundle never links cached core build output.
+      - name: Build the Rust core
+        if: inputs.rust-core-ref != ''
+        uses: mattas-net/we-just-might-core/.github/actions/build-android@main
+        with:
+          ref: ${{ steps.core.outputs.sha }}
+          ssh-key: ${{ secrets.WJM_CORE_DEPLOY_KEY }}
+          cache-target: "false"
+
+      - name: Restore google-services.json
+        if: inputs.google-services-json != ''
+        shell: bash
+        env:
+          JSON_BASE64: ${{ secrets.GOOGLE_SERVICES_JSON_BASE64 }}
+          JSON_PATH: ${{ inputs.google-services-json }}
+        run: |
+          set -euo pipefail
+          if [ -z "$JSON_BASE64" ]; then
+            echo "::error::GOOGLE_SERVICES_JSON_BASE64 is not set"
+            exit 1
+          fi
+          mkdir -p "$(dirname "$JSON_PATH")"
+          printf '%s' "$JSON_BASE64" | base64 --decode > "$JSON_PATH"
+          jq -e '.project_info.project_id' "$JSON_PATH" > /dev/null
+
+      # Both apps read rootProject.file("keystore.properties") for the release signing config.
+      - name: Install the upload keystore
+        shell: bash
+        env:
+          KEYSTORE_BASE64: ${{ secrets.UPLOAD_KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.UPLOAD_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.UPLOAD_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.UPLOAD_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          for v in KEYSTORE_BASE64 KEYSTORE_PASSWORD KEY_ALIAS KEY_PASSWORD; do
+            if [ -z "${!v:-}" ]; then
+              echo "::error::$v is empty: set the UPLOAD_KEYSTORE_BASE64, UPLOAD_KEYSTORE_PASSWORD, UPLOAD_KEY_ALIAS and UPLOAD_KEY_PASSWORD secrets"
+              exit 1
+            fi
+          done
+          keystore="$RUNNER_TEMP/upload.jks"
+          (umask 077 && printf '%s' "$KEYSTORE_BASE64" | base64 --decode > "$keystore")
+          test -s "$keystore"
+          # Fail here with a clear message on a bad alias or password, not mid-build.
+          keytool -list -keystore "$keystore" -storepass:env KEYSTORE_PASSWORD -alias "$KEY_ALIAS" > /dev/null
+          (umask 077 && printf 'storeFile=%s\nstorePassword=%s\nkeyAlias=%s\nkeyPassword=%s\n' \
+            "$keystore" "$KEYSTORE_PASSWORD" "$KEY_ALIAS" "$KEY_PASSWORD" > keystore.properties)
+          echo "KEYSTORE_PATH=$keystore" >> "$GITHUB_ENV"
+
+      - name: Build the signed release bundle
+        shell: bash
+        env:
+          VERSION: ${{ inputs.version }}
+          CODE: ${{ steps.version.outputs.code }}
+          TASK: ${{ steps.version.outputs.task }}
+          VARIANT: ${{ steps.version.outputs.variant }}
+          MODULE: ${{ inputs.module }}
+          VERSION_NAME_PROPERTY: ${{ inputs.version-name-property }}
+          VERSION_CODE_PROPERTY: ${{ inputs.version-code-property }}
+          BUILD_NUMBER_PROPERTY: ${{ inputs.build-number-property }}
+          GRADLE_ARGS: ${{ inputs.gradle-args }}
+        run: |
+          set -euo pipefail
+          # Split on any whitespace, newlines included, without glob or shell expansion.
+          extra=(); while read -ra words; do extra+=(${words[@]+"${words[@]}"}); done <<< "$GRADLE_ARGS"
+          props=("-P$VERSION_NAME_PROPERTY=$VERSION" "-P$VERSION_CODE_PROPERTY=$CODE")
+          if [ -n "$BUILD_NUMBER_PROPERTY" ]; then props+=("-P$BUILD_NUMBER_PROPERTY=$CODE"); fi
+          echo "Building $TASK with versionName=$VERSION versionCode=$CODE"
+          ./gradlew --no-daemon "$TASK" "${props[@]}" ${extra[@]+"${extra[@]}"}
+          shopt -s nullglob
+          bundles=("$MODULE/build/outputs/bundle/$VARIANT"/*.aab)
+          if [ "${#bundles[@]}" -ne 1 ]; then
+            echo "::error::expected one .aab in $MODULE/build/outputs/bundle/$VARIANT, found ${#bundles[@]}"
+            exit 1
+          fi
+          mapping="$MODULE/build/outputs/mapping/$VARIANT/mapping.txt"
+          [ -f "$mapping" ] || mapping=""
+          {
+            echo "AAB_PATH=${bundles[0]}"
+            echo "MAPPING_PATH=$mapping"
+          } >> "$GITHUB_ENV"
+          ls -l "${bundles[0]}" ${mapping:+"$mapping"}
+
+      - name: Keep the bundle and mapping file
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: release-${{ inputs.version }}-${{ steps.version.outputs.code }}
+          retention-days: 90
+          path: |
+            ${{ env.AAB_PATH }}
+            ${{ env.MAPPING_PATH }}
+          if-no-files-found: error
+
+      # No mappingFile: AGP embeds the R8 map in the bundle
+      # (BUNDLE-METADATA/com.android.tools.build.obfuscation/proguard.map) and Play reads it.
+      - name: Upload to Google Play
+        uses: r0adkll/upload-google-play@935ef9c68bb393a8e6116b1575626a7f5be3a7fb # v1.1.3
+        with:
+          serviceAccountJsonPlainText: ${{ secrets.PLAY_SERVICE_ACCOUNT_JSON }}
+          packageName: ${{ inputs.package-name }}
+          releaseFiles: ${{ env.AAB_PATH }}
+          track: ${{ steps.version.outputs.track }}
+          status: ${{ inputs.release-status }}
+          releaseName: ${{ inputs.version }} (${{ steps.version.outputs.code }})
+
+      - name: Attach the bundle to the GitHub Release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          name="${GITHUB_REPOSITORY#*/}-${VERSION}"
+          assets="$RUNNER_TEMP/release-assets"
+          mkdir -p "$assets"
+          cp "$AAB_PATH" "$assets/$name.aab"
+          files=("$assets/$name.aab")
+          if [ -n "$MAPPING_PATH" ]; then
+            cp "$MAPPING_PATH" "$assets/$name-mapping.txt"
+            files+=("$assets/$name-mapping.txt")
+          fi
+          gh release upload "$VERSION" "${files[@]}" --clobber --repo "$GITHUB_REPOSITORY"
+
+      - name: Write release summary
+        if: always()
+        shell: bash
+        env:
+          VERSION: ${{ inputs.version }}
+          CODE: ${{ steps.version.outputs.code }}
+          TRACK: ${{ steps.version.outputs.track }}
+          PRERELEASE: ${{ steps.version.outputs.prerelease }}
+        run: |
+          {
+            echo "## Android release $VERSION"
+            echo ""
+            echo "- **versionName:** \`$VERSION\`"
+            echo "- **versionCode:** \`$CODE\`"
+            echo "- **Play track:** \`$TRACK\`"
+            echo "- **Commit:** \`$(git rev-parse HEAD)\`"
+            if [ "$PRERELEASE" = "true" ]; then
+              echo ""
+              echo "Pre-release: internal testing only. Do not promote this build."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Remove signing assets
+        if: always()
+        shell: bash
+        run: |
+          rm -f keystore.properties
+          if [ -n "${KEYSTORE_PATH:-}" ]; then rm -f "$KEYSTORE_PATH"; fi
