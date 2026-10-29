@@ -1,9 +1,10 @@
 name: Build and Push Docker Image (reusable)
 
-# Shared by the mattas-net web sites. Callers run it on workflow_dispatch from a
-# release/* branch; the branch name becomes the image tag (release/latest -> latest).
-# The image is pushed to ghcr.io/<owner>/<repo> with the OCI source label, which
-# links the package to the calling repository.
+# Shared by the mattas-net web sites. Callers run it when a GitHub release is
+# published (GitHub creates the tag from the release target) or on a manual
+# dispatch from an existing tag. The image is pushed to ghcr.io/<owner>/<repo>
+# tagged with the release tag, plus `latest` unless the release is a pre-release.
+# The OCI source label links the package to the calling repository.
 on:
   workflow_call:
     inputs:
@@ -35,8 +36,8 @@ env:
 # Actions are pinned by commit SHA; the comment names the tag each SHA was resolved from.
 jobs:
   verify:
-    # Only release/* branches map to a deployment tag.
-    if: inputs.verify && startsWith(github.ref, 'refs/heads/release/')
+    # Only tags map to an image tag; a dispatch from a branch does nothing.
+    if: inputs.verify && github.ref_type == 'tag'
     runs-on: ubuntu-24.04
     permissions:
       contents: read
@@ -70,7 +71,7 @@ jobs:
     needs: verify
     # always() lets the job run when verify was skipped (inputs.verify=false);
     # a failed verify still blocks the build.
-    if: always() && needs.verify.result != 'failure' && needs.verify.result != 'cancelled' && startsWith(github.ref, 'refs/heads/release/')
+    if: always() && needs.verify.result != 'failure' && needs.verify.result != 'cancelled' && github.ref_type == 'tag'
     runs-on: ubuntu-24.04
     permissions:
       contents: read
@@ -92,17 +93,24 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Determine deployment tag
+      - name: Determine image tags
         id: vars
         shell: bash
         env:
-          REF_NAME: ${{ github.ref_name }}
+          IMAGE: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          TAG: ${{ github.ref_name }}
+          # On a manual dispatch there is no release payload; treat it as a full release.
+          PRERELEASE: ${{ github.event_name == 'release' && github.event.release.prerelease }}
         run: |
-          if [ "$REF_NAME" = "release/latest" ]; then
-            echo "tag=latest" >> "$GITHUB_OUTPUT"
-          else
-            echo "tag=${REF_NAME#release/}" >> "$GITHUB_OUTPUT"
+          tags="${IMAGE}:${TAG}"
+          if [ "$PRERELEASE" != "true" ]; then
+            tags="${tags}"$'\n'"${IMAGE}:latest"
           fi
+          {
+            echo "tags<<EOF"
+            echo "$tags"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Extract metadata for Docker
         id: meta
@@ -117,7 +125,7 @@ jobs:
           context: .
           platforms: ${{ inputs.platforms }}
           push: true
-          tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.vars.outputs.tag }}
+          tags: ${{ steps.vars.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           build-args: ${{ inputs.build-args }}
           cache-from: type=gha
@@ -126,4 +134,5 @@ jobs:
       - name: Image digest
         env:
           DIGEST: ${{ steps.build.outputs.digest }}
-        run: echo "Image pushed with digest $DIGEST"
+          TAGS: ${{ steps.vars.outputs.tags }}
+        run: printf 'Pushed %s\n%s\n' "$DIGEST" "$TAGS"
