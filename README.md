@@ -38,16 +38,32 @@ means the run was dispatched from a tag), `build-args`, `platforms`
 
 ## Caller templates
 
-`.github/workflows/checks.yml`
+`.github/workflows/checks.yml` — automatic on push to main; on pull requests
+the run waits at the `approve` job (no runner minutes) until a required
+reviewer approves it in the repo's `approval` environment, which is what lets
+the ruleset's required `node / checks` attach to the PR. A manually dispatched
+run does not attach to a PR, so it cannot satisfy the gate.
 
 ```yaml
 name: Checks
 on:
   push:
     branches: [main]
+  pull_request:
   workflow_dispatch:
+concurrency:
+  group: checks-${{ github.ref }}
+  cancel-in-progress: true
 jobs:
+  approve:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
+    environment: approval
+    steps:
+      - run: echo "Checks approved by ${GITHUB_TRIGGERING_ACTOR}"
   node:
+    needs: approve
+    if: always() && needs.approve.result != 'failure' && needs.approve.result != 'cancelled'
     uses: mattas-net/.github/.github/workflows/node-ci.yml@main
     permissions:
       contents: read
