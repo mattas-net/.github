@@ -1,0 +1,607 @@
+name: iOS Release (reusable)
+
+# Builds the release that create-release.yml just tagged and ships it to App Store Connect.
+# The caller's release.yml chains it after create-release.yml (needs: release) with
+# `version` set to the new tag. This workflow:
+#   1. runs ios-ci.yml on the tag (verify: true), the one place the macOS checks always run;
+#   2. derives the build number from the tag: MAJOR*1000000 + MINOR*10000 + PATCH*100 + N,
+#      N = 1-30 for -alphaK, 31-60 for -betaK, 61-98 for -rcK, 99 for the final release
+#      (1.4.2-beta1 -> 1040231, 1.4.2-rc1 -> 1040261, 1.4.2 -> 1040299), strictly increasing within a
+#      version: the final release sorts after its pre-releases; any other suffix fails the run;
+#   3. stamps MARKETING_VERSION (X.Y.Z, suffix removed: App Store versions are numeric) and
+#      CURRENT_PROJECT_VERSION into project.yml on the runner only (never committed), or
+#      passes them as build settings when the project is checked in (xcodegen: false);
+#   4. archives, exports a signed IPA, uploads it to App Store Connect with the API key;
+#   5. attaches the IPA and the dSYMs to the GitHub Release.
+# Every upload lands in TestFlight. Submitting for App Store review stays a manual step in
+# App Store Connect; for a pre-release version (hyphen suffix) the summary says TestFlight
+# only, and the build should never be submitted.
+#
+# Secrets (pass with `secrets: inherit`): DISTRIBUTION_CERT_P12_BASE64,
+# DISTRIBUTION_CERT_PASSWORD, PROVISIONING_PROFILE_BASE64, optional
+# EXTRA_PROVISIONING_PROFILE_BASE64, ASC_KEY_ID, ASC_ISSUER_ID, ASC_KEY_P8, plus
+# WJM_CORE_DEPLOY_KEY (rust-core-ref) and GOOGLE_SERVICE_INFO_PLIST_BASE64
+# (google-service-info-plist) where used.
+on:
+  workflow_call:
+    inputs:
+      version:
+        description: The release tag to build (bare semver, e.g. 1.4.2 or 1.4.2-beta1).
+        type: string
+        required: true
+      environment:
+        description: Deployment environment for the upload job (its secrets and protection rules apply).
+        type: string
+        default: Deploy
+      verify:
+        description: Run ios-ci.yml on the tag before archiving.
+        type: boolean
+        default: true
+      release-check-commands:
+        description: Shell run from the repo root before anything is built (release-only gates).
+        type: string
+        default: ""
+      scheme:
+        description: Scheme to archive.
+        type: string
+        required: true
+      configuration:
+        description: Build configuration to archive.
+        type: string
+        default: Release
+      export-options:
+        description: ExportOptions.plist path relative to project-dir. teamID and provisioningProfiles are filled from the installed profiles; the upload uses a copy with destination=upload.
+        type: string
+        default: ExportOptions.plist
+      bundle-id:
+        description: Expected bundle id of the provisioning profile (empty = not checked).
+        type: string
+        default: ""
+      signing-overrides:
+        description: Pass CODE_SIGN_STYLE/DEVELOPMENT_TEAM/PROVISIONING_PROFILE_SPECIFIER from the installed profile on the archive command line. Leave false when project.yml configures release signing per target.
+        type: boolean
+        default: false
+      google-service-info-plist:
+        description: Repo path to restore GoogleService-Info.plist to from GOOGLE_SERVICE_INFO_PLIST_BASE64 (empty = none).
+        type: string
+        default: ""
+      # Passed through to ios-ci.yml (see its descriptions); the project inputs are also used here.
+      project-dir:
+        description: Directory holding project.yml / the .xcodeproj.
+        type: string
+        default: "."
+      project:
+        description: The .xcodeproj file name (empty = the only one there).
+        type: string
+        default: ""
+      xcodegen:
+        description: Generate the project from project.yml with XcodeGen.
+        type: boolean
+        default: true
+      xcodegen-version:
+        description: XcodeGen release to install.
+        type: string
+        default: "2.46.0"
+      xcodegen-sha256:
+        description: SHA-256 of that release's xcodegen.zip.
+        type: string
+        default: 4d9e34b62172d645eed6457cac13fc222569974098ef4ee9c3368bedf0196806
+      xcode-version:
+        description: Xcode to select (empty = runner default).
+        type: string
+        default: ""
+      xcode-version-file:
+        description: File holding the Xcode version (used when xcode-version is empty).
+        type: string
+        default: ""
+      rust-core-ref:
+        description: We Just Might only. File holding the we-just-might-core SHA, or the SHA.
+        type: string
+        default: ""
+      package-path:
+        description: ios-ci package-path.
+        type: string
+        default: ""
+      swift-test-args:
+        description: ios-ci swift-test-args.
+        type: string
+        default: ""
+      test-commands:
+        description: ios-ci test-commands.
+        type: string
+        default: ""
+      test-env:
+        description: ios-ci test-env.
+        type: string
+        default: ""
+      lint:
+        description: ios-ci lint.
+        type: boolean
+        default: true
+      lint-dir:
+        description: ios-ci lint-dir.
+        type: string
+        default: "."
+      lint-args:
+        description: ios-ci lint-args.
+        type: string
+        default: ""
+      swiftlint-version:
+        description: ios-ci swiftlint-version.
+        type: string
+        default: "0.63.3"
+      swiftlint-sha256:
+        description: ios-ci swiftlint-sha256.
+        type: string
+        default: fb045e85e7cb3374f42a4840b6b85a0106302afa69035c0c6f29af4a44c810b6
+      app-scheme:
+        description: ios-ci app-scheme (empty = scheme).
+        type: string
+        default: ""
+      app-build:
+        description: ios-ci app-build.
+        type: boolean
+        default: true
+      app-build-commands:
+        description: ios-ci app-build-commands.
+        type: string
+        default: ""
+      app-test:
+        description: ios-ci app-test.
+        type: boolean
+        default: false
+      app-test-args:
+        description: ios-ci app-test-args.
+        type: string
+        default: ""
+    secrets:
+      DISTRIBUTION_CERT_P12_BASE64:
+        description: Base64 PKCS#12 Apple Distribution certificate.
+        required: true
+      DISTRIBUTION_CERT_PASSWORD:
+        description: Password for the certificate.
+        required: true
+      PROVISIONING_PROFILE_BASE64:
+        description: Base64 App Store provisioning profile for the app.
+        required: true
+      EXTRA_PROVISIONING_PROFILE_BASE64:
+        description: Optional second profile, e.g. for an app extension.
+        required: false
+      ASC_KEY_ID:
+        description: App Store Connect API key id.
+        required: true
+      ASC_ISSUER_ID:
+        description: App Store Connect API issuer id.
+        required: true
+      ASC_KEY_P8:
+        description: App Store Connect API private key (.p8 contents).
+        required: true
+      WJM_CORE_DEPLOY_KEY:
+        description: Read-only deploy key for mattas-net/we-just-might-core (rust-core-ref only).
+        required: false
+      GOOGLE_SERVICE_INFO_PLIST_BASE64:
+        description: Base64 GoogleService-Info.plist (google-service-info-plist only).
+        required: false
+
+permissions:
+  contents: read
+
+# Actions are pinned by commit SHA; the comment names the tag each SHA was resolved from.
+jobs:
+  ci:
+    if: inputs.verify
+    uses: mattas-net/.github/.github/workflows/ios-ci.yml@main
+    permissions:
+      contents: read
+    secrets: inherit
+    with:
+      ref: ${{ inputs.version }}
+      platform: iOS
+      project-dir: ${{ inputs.project-dir }}
+      project: ${{ inputs.project }}
+      xcodegen: ${{ inputs.xcodegen }}
+      xcodegen-version: ${{ inputs.xcodegen-version }}
+      xcodegen-sha256: ${{ inputs.xcodegen-sha256 }}
+      xcode-version: ${{ inputs.xcode-version }}
+      xcode-version-file: ${{ inputs.xcode-version-file }}
+      rust-core-ref: ${{ inputs.rust-core-ref }}
+      package-path: ${{ inputs.package-path }}
+      swift-test-args: ${{ inputs.swift-test-args }}
+      test-commands: ${{ inputs.test-commands }}
+      test-env: ${{ inputs.test-env }}
+      lint: ${{ inputs.lint }}
+      lint-dir: ${{ inputs.lint-dir }}
+      lint-args: ${{ inputs.lint-args }}
+      swiftlint-version: ${{ inputs.swiftlint-version }}
+      swiftlint-sha256: ${{ inputs.swiftlint-sha256 }}
+      app-scheme: ${{ inputs.app-scheme != '' && inputs.app-scheme || inputs.scheme }}
+      app-build: ${{ inputs.app-build }}
+      app-build-commands: ${{ inputs.app-build-commands }}
+      app-test: ${{ inputs.app-test }}
+      app-test-args: ${{ inputs.app-test-args }}
+
+  app-store:
+    needs: ci
+    # always() lets the job run when verify is false (ci skipped); a failed ci blocks it.
+    if: always() && needs.ci.result != 'failure' && needs.ci.result != 'cancelled'
+    runs-on: macos-26
+    timeout-minutes: 120
+    environment: ${{ inputs.environment }}
+    # Serialize uploads per repo and never cancel one mid-upload.
+    concurrency:
+      group: deploy-app-store-${{ github.repository }}
+      cancel-in-progress: false
+    permissions:
+      contents: write # attach the IPA and dSYMs to the GitHub Release
+
+    steps:
+      - name: Derive marketing version and build number
+        id: version
+        shell: bash
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          if ! [[ "$VERSION" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z.]+)?$ ]]; then
+            echo "::error::'$VERSION' is not bare semver (X.Y.Z or X.Y.Z-suffix; no v prefix)"
+            exit 1
+          fi
+          major="${BASH_REMATCH[1]}"; minor="${BASH_REMATCH[2]}"; patch="${BASH_REMATCH[3]}"
+          suffix="${BASH_REMATCH[4]#-}"
+          if [ "$minor" -gt 99 ] || [ "$patch" -gt 99 ]; then
+            echo "::error::MINOR and PATCH must be <= 99 for the MAJOR*1000000+MINOR*10000+PATCH*100+N build number"
+            exit 1
+          fi
+          if [ "$major" -gt 2099 ]; then
+            echo "::error::MAJOR must be <= 2099 (Play caps versionCode at 2100000000)"
+            exit 1
+          fi
+          # N orders the builds of one X.Y.Z: alpha 1-30, beta 31-60, rc 61-98, final 99.
+          if [ -z "$suffix" ]; then
+            n=99
+          elif [[ "$suffix" =~ ^(alpha|beta|rc)\.?([1-9][0-9]*)$ ]]; then
+            kind="${BASH_REMATCH[1]}"; k="${BASH_REMATCH[2]}"
+            case "$kind" in
+              alpha) base=0; max=30 ;;
+              beta) base=30; max=30 ;;
+              rc) base=60; max=38 ;;
+            esac
+            if [ "${#k}" -gt 2 ] || [ "$k" -gt "$max" ]; then
+              echo "::error::-$kind$k is out of range: $kind numbers run from 1 to $max"
+              exit 1
+            fi
+            n=$(( base + k ))
+          else
+            echo "::error::pre-release suffix '-$suffix' is not supported: use -alphaK, -betaK or -rcK (or -alpha.K, -beta.K, -rc.K), K from 1"
+            exit 1
+          fi
+          build=$(( major * 1000000 + minor * 10000 + patch * 100 + n ))
+          prerelease=false
+          [[ "$VERSION" == *-* ]] && prerelease=true
+          {
+            echo "marketing=$major.$minor.$patch"
+            echo "build=$build"
+            echo "prerelease=$prerelease"
+          } >> "$GITHUB_OUTPUT"
+          echo "Version $VERSION -> MARKETING_VERSION $major.$minor.$patch, CURRENT_PROJECT_VERSION $build (pre-release: $prerelease)"
+
+      - name: Checkout the release tag
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.version }}
+
+      - name: Release checks
+        if: inputs.release-check-commands != ''
+        shell: bash
+        env:
+          RELEASE_CHECK_COMMANDS: ${{ inputs.release-check-commands }}
+        run: bash -euo pipefail -c "$RELEASE_CHECK_COMMANDS"
+
+      - name: Select Xcode
+        shell: bash
+        env:
+          XCODE_VERSION: ${{ inputs.xcode-version }}
+          XCODE_VERSION_FILE: ${{ inputs.xcode-version-file }}
+        run: |
+          set -euo pipefail
+          version="$XCODE_VERSION"
+          if [ -z "$version" ] && [ -n "$XCODE_VERSION_FILE" ]; then
+            version="$(tr -d '[:space:]' < "$XCODE_VERSION_FILE")"
+          fi
+          if [ -n "$version" ]; then
+            app="/Applications/Xcode_${version}.app"
+            if [ ! -d "$app" ]; then
+              echo "::error::$app is not on this runner. Available:"
+              ls -d /Applications/Xcode*.app
+              exit 1
+            fi
+            sudo xcode-select -s "$app"
+          fi
+          xcodebuild -version
+
+      # Every downloaded tool is installed and digest-verified before any secret is
+      # materialized, so no tool download can observe the signing material.
+      - name: Install XcodeGen (pinned, digest-verified)
+        if: inputs.xcodegen
+        shell: bash
+        env:
+          XCODEGEN_VERSION: ${{ inputs.xcodegen-version }}
+          XCODEGEN_SHA256: ${{ inputs.xcodegen-sha256 }}
+        run: |
+          set -euo pipefail
+          curl -fsSL -o "$RUNNER_TEMP/xcodegen.zip" \
+            "https://github.com/yonaskolb/XcodeGen/releases/download/$XCODEGEN_VERSION/xcodegen.zip"
+          echo "$XCODEGEN_SHA256  $RUNNER_TEMP/xcodegen.zip" | shasum -a 256 -c -
+          unzip -q -o "$RUNNER_TEMP/xcodegen.zip" -d "$RUNNER_TEMP"
+          echo "$RUNNER_TEMP/xcodegen/bin" >> "$GITHUB_PATH"
+
+      - name: Resolve the Rust core commit
+        id: core
+        if: inputs.rust-core-ref != ''
+        shell: bash
+        env:
+          CORE_REF: ${{ inputs.rust-core-ref }}
+        run: |
+          set -euo pipefail
+          if [[ "$CORE_REF" =~ ^[0-9a-f]{40}$ ]]; then sha="$CORE_REF"; else sha="$(tr -d '[:space:]' < "$CORE_REF")"; fi
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+
+      # The production archive never links cached core build output.
+      - name: Build the Rust core
+        if: inputs.rust-core-ref != ''
+        uses: mattas-net/we-just-might-core/.github/actions/build-ios@main
+        with:
+          ref: ${{ steps.core.outputs.sha }}
+          ssh-key: ${{ secrets.WJM_CORE_DEPLOY_KEY }}
+          cache-target: "false"
+
+      # Runner-local only: the stamped project.yml is never committed or pushed.
+      - name: Stamp the version into project.yml
+        if: inputs.xcodegen
+        shell: bash
+        working-directory: ${{ inputs.project-dir }}
+        env:
+          MARKETING: ${{ steps.version.outputs.marketing }}
+          BUILD: ${{ steps.version.outputs.build }}
+        run: |
+          set -euo pipefail
+          for key in MARKETING_VERSION CURRENT_PROJECT_VERSION; do
+            count="$(grep -cE "^[[:space:]]*${key}:" project.yml || true)"
+            if [ "$count" = "0" ]; then
+              echo "::error::project.yml declares no ${key}"
+              exit 1
+            fi
+          done
+          sed -i '' -E "s|^([[:space:]]*)MARKETING_VERSION:.*$|\1MARKETING_VERSION: \"${MARKETING}\"|" project.yml
+          sed -i '' -E "s|^([[:space:]]*)CURRENT_PROJECT_VERSION:.*$|\1CURRENT_PROJECT_VERSION: \"${BUILD}\"|" project.yml
+          grep -nE "MARKETING_VERSION|CURRENT_PROJECT_VERSION" project.yml
+
+      - name: Generate the Xcode project
+        if: inputs.xcodegen
+        working-directory: ${{ inputs.project-dir }}
+        run: xcodegen generate
+
+      - name: Resolve the Xcode project
+        shell: bash
+        working-directory: ${{ inputs.project-dir }}
+        env:
+          PROJECT: ${{ inputs.project }}
+        run: |
+          set -euo pipefail
+          if [ -z "$PROJECT" ]; then
+            shopt -s nullglob
+            found=(*.xcodeproj)
+            if [ "${#found[@]}" -ne 1 ]; then
+              echo "::error::expected one .xcodeproj in $PWD, found ${#found[@]}; set the project input"
+              exit 1
+            fi
+            PROJECT="${found[0]}"
+          fi
+          test -d "$PROJECT"
+          echo "XCODE_PROJECT=$PROJECT" >> "$GITHUB_ENV"
+
+      - name: Restore GoogleService-Info.plist
+        if: inputs.google-service-info-plist != ''
+        shell: bash
+        env:
+          PLIST_BASE64: ${{ secrets.GOOGLE_SERVICE_INFO_PLIST_BASE64 }}
+          PLIST_PATH: ${{ inputs.google-service-info-plist }}
+        run: |
+          set -euo pipefail
+          if [ -z "$PLIST_BASE64" ]; then
+            echo "::error::GOOGLE_SERVICE_INFO_PLIST_BASE64 is not set"
+            exit 1
+          fi
+          mkdir -p "$(dirname "$PLIST_PATH")"
+          printf '%s' "$PLIST_BASE64" | base64 --decode > "$PLIST_PATH"
+          plutil -lint "$PLIST_PATH"
+
+      - name: Install signing assets
+        uses: mattas-net/.github/.github/actions/apple-signing@main
+        with:
+          certificate-p12-base64: ${{ secrets.DISTRIBUTION_CERT_P12_BASE64 }}
+          certificate-password: ${{ secrets.DISTRIBUTION_CERT_PASSWORD }}
+          profile-base64: ${{ secrets.PROVISIONING_PROFILE_BASE64 }}
+          extra-profile-base64: ${{ secrets.EXTRA_PROVISIONING_PROFILE_BASE64 }}
+          bundle-id: ${{ inputs.bundle-id }}
+
+      # Fill a runner-temporary copy of the export options from the installed profiles, and
+      # derive the upload options from it so export and upload can never sign differently.
+      - name: Prepare export and upload options
+        shell: bash
+        env:
+          EXPORT_OPTIONS: ${{ inputs.project-dir }}/${{ inputs.export-options }}
+        run: |
+          set -euo pipefail
+          python3 - "$EXPORT_OPTIONS" "$RUNNER_TEMP/ExportOptions.plist" "$RUNNER_TEMP/UploadOptions.plist" "$SIGNING_TEAM_ID" "$SIGNING_PROFILES_TSV" <<'PY'
+          import plistlib, sys
+          from pathlib import Path
+          source, export_path, upload_path, team_id, tsv = sys.argv[1:6]
+          options = plistlib.loads(Path(source).read_bytes())
+          options["teamID"] = team_id
+          profiles = dict(options.get("provisioningProfiles") or {})
+          for line in Path(tsv).read_text().splitlines():
+              if line.strip():
+                  bundle_id, name = line.split("\t", 1)
+                  profiles[bundle_id] = name
+          options["provisioningProfiles"] = profiles
+          options["destination"] = "export"
+          Path(export_path).write_bytes(plistlib.dumps(options))
+          Path(upload_path).write_bytes(plistlib.dumps(dict(options, destination="upload")))
+          PY
+
+      - name: Archive
+        shell: bash
+        working-directory: ${{ inputs.project-dir }}
+        env:
+          SCHEME: ${{ inputs.scheme }}
+          CONFIGURATION: ${{ inputs.configuration }}
+          SIGNING_OVERRIDES: ${{ inputs.signing-overrides }}
+          XCODEGEN: ${{ inputs.xcodegen }}
+          MARKETING: ${{ steps.version.outputs.marketing }}
+          BUILD: ${{ steps.version.outputs.build }}
+        run: |
+          set -euo pipefail
+          settings=()
+          if [ "$SIGNING_OVERRIDES" = "true" ]; then
+            settings+=(CODE_SIGN_STYLE=Manual "DEVELOPMENT_TEAM=$SIGNING_TEAM_ID" "PROVISIONING_PROFILE_SPECIFIER=$SIGNING_PROFILE_NAME")
+          fi
+          if [ "$XCODEGEN" != "true" ]; then
+            # Checked-in project: stamp the version as build settings instead of editing it.
+            settings+=("MARKETING_VERSION=$MARKETING" "CURRENT_PROJECT_VERSION=$BUILD")
+          fi
+          # xcodebuild's own exit status is the gate; the filtered output is display only.
+          set +e
+          xcodebuild archive \
+            -project "$XCODE_PROJECT" \
+            -scheme "$SCHEME" \
+            -configuration "$CONFIGURATION" \
+            -destination 'generic/platform=iOS' \
+            -archivePath "$RUNNER_TEMP/App.xcarchive" \
+            -skipPackagePluginValidation \
+            ${settings[@]+"${settings[@]}"} \
+            > "$RUNNER_TEMP/archive.log" 2>&1
+          status=$?
+          set -e
+          grep -E 'error:|ARCHIVE (SUCCEEDED|FAILED)' "$RUNNER_TEMP/archive.log" || true
+          if [ "$status" -ne 0 ]; then tail -n 100 "$RUNNER_TEMP/archive.log" >&2; exit "$status"; fi
+          plist="$RUNNER_TEMP/App.xcarchive/Info.plist"
+          echo "Archived $(/usr/libexec/PlistBuddy -c 'Print :ApplicationProperties:CFBundleShortVersionString' "$plist") ($(/usr/libexec/PlistBuddy -c 'Print :ApplicationProperties:CFBundleVersion' "$plist"))"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :ApplicationProperties:CFBundleShortVersionString' "$plist")" = "$MARKETING"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :ApplicationProperties:CFBundleVersion' "$plist")" = "$BUILD"
+
+      - name: Export signed IPA
+        shell: bash
+        run: |
+          set -euo pipefail
+          xcodebuild -exportArchive \
+            -archivePath "$RUNNER_TEMP/App.xcarchive" \
+            -exportPath "$RUNNER_TEMP/export" \
+            -exportOptionsPlist "$RUNNER_TEMP/ExportOptions.plist" \
+            > "$RUNNER_TEMP/export.log" 2>&1 || { tail -n 100 "$RUNNER_TEMP/export.log" >&2; exit 1; }
+          ipa_count="$(find "$RUNNER_TEMP/export" -maxdepth 1 -type f -name '*.ipa' | wc -l | tr -d ' ')"
+          test "$ipa_count" -eq 1
+
+      # xcodebuild -exportArchive with destination "upload" rather than altool: on Xcode
+      # 26.x runners `altool --upload-app` with API-key auth fails with "Cannot determine
+      # the Apple ID from Bundle ID" (law18, release 1.3.0).
+      - name: Upload to App Store Connect
+        shell: bash
+        env:
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+          ASC_KEY_P8: ${{ secrets.ASC_KEY_P8 }}
+        run: |
+          set -euo pipefail
+          for variable in ASC_KEY_ID ASC_ISSUER_ID ASC_KEY_P8; do
+            if [ -z "${!variable:-}" ]; then
+              echo "::error::$variable is not set or is empty"
+              exit 1
+            fi
+          done
+          key_dir="$RUNNER_TEMP/asc"
+          mkdir -p "$key_dir"
+          key_path="$key_dir/AuthKey_${ASC_KEY_ID}.p8"
+          (umask 077 && printf '%s\n' "$ASC_KEY_P8" > "$key_path")
+          set +e
+          xcodebuild -exportArchive \
+            -archivePath "$RUNNER_TEMP/App.xcarchive" \
+            -exportPath "$RUNNER_TEMP/upload" \
+            -exportOptionsPlist "$RUNNER_TEMP/UploadOptions.plist" \
+            -authenticationKeyPath "$key_path" \
+            -authenticationKeyID "$ASC_KEY_ID" \
+            -authenticationKeyIssuerID "$ASC_ISSUER_ID" \
+            > "$RUNNER_TEMP/upload.log" 2>&1
+          status=$?
+          set -e
+          rm -f "$key_path"
+          grep -E 'error:|EXPORT (SUCCEEDED|FAILED)|Upload' "$RUNNER_TEMP/upload.log" || true
+          if [ "$status" -ne 0 ]; then tail -n 100 "$RUNNER_TEMP/upload.log" >&2; exit "$status"; fi
+
+      - name: Attach the IPA and dSYMs to the GitHub Release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          name="${GITHUB_REPOSITORY#*/}-${VERSION}"
+          assets="$RUNNER_TEMP/release-assets"
+          mkdir -p "$assets"
+          ipa="$(find "$RUNNER_TEMP/export" -maxdepth 1 -type f -name '*.ipa' | head -n1)"
+          cp "$ipa" "$assets/$name.ipa"
+          files=("$assets/$name.ipa")
+          dsyms="$RUNNER_TEMP/App.xcarchive/dSYMs"
+          if [ -d "$dsyms" ] && [ -n "$(ls -A "$dsyms")" ]; then
+            ditto -c -k --keepParent "$dsyms" "$assets/$name-dSYMs.zip"
+            files+=("$assets/$name-dSYMs.zip")
+          fi
+          gh release upload "$VERSION" "${files[@]}" --clobber --repo "$GITHUB_REPOSITORY"
+
+      - name: Upload release diagnostics on failure
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ios-release-diagnostics
+          path: |
+            ${{ runner.temp }}/archive.log
+            ${{ runner.temp }}/export.log
+            ${{ runner.temp }}/upload.log
+            ${{ runner.temp }}/App.xcarchive/Info.plist
+          if-no-files-found: ignore
+          retention-days: 7
+
+      - name: Write release summary
+        if: always()
+        shell: bash
+        env:
+          VERSION: ${{ inputs.version }}
+          MARKETING: ${{ steps.version.outputs.marketing }}
+          BUILD: ${{ steps.version.outputs.build }}
+          PRERELEASE: ${{ steps.version.outputs.prerelease }}
+        run: |
+          {
+            echo "## iOS release $VERSION"
+            echo ""
+            echo "- **Marketing version:** \`$MARKETING\`"
+            echo "- **Build number:** \`$BUILD\`"
+            echo "- **Commit:** \`$(git rev-parse HEAD)\`"
+            echo ""
+            echo "The build appears in TestFlight once App Store Connect finishes processing."
+            if [ "$PRERELEASE" = "true" ]; then
+              echo "Pre-release: TestFlight only. Do not submit this build for App Store review."
+            else
+              echo "Submit it for App Store review manually from App Store Connect."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Remove temporary signing and App Store Connect assets
+        if: always()
+        shell: bash
+        run: |
+          rm -rf "$RUNNER_TEMP/asc"
+          if [ -n "${SIGNING_PROFILE_PATHS:-}" ]; then
+            while IFS= read -r p; do [ -n "$p" ] && rm -f "$p"; done <<< "$SIGNING_PROFILE_PATHS"
+          fi
+          if [ -n "${SIGNING_KEYCHAIN_PATH:-}" ]; then security delete-keychain "$SIGNING_KEYCHAIN_PATH" || true; fi
+          rm -f "${SIGNING_PROFILES_TSV:-}"

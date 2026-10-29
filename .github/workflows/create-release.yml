@@ -4,7 +4,9 @@ name: Create Release (reusable)
 # `version` input and passes it here. This workflow:
 #   1. validates the version is bare semver (1.4.2 or 1.4.2-beta1, never v1.4.2),
 #   2. checks out main and refuses to continue unless the manifest on main
-#      already carries exactly that version (bump it, merge, re-run),
+#      already carries exactly that version (bump it, merge, re-run); see the
+#      verify step for the lookup per manifest type (.json, .toml, .yml/.yaml,
+#      .properties),
 #   3. refuses if the tag (or a legacy v-tag) already exists,
 #   4. optionally requires the named check workflow to have succeeded on main HEAD,
 #   5. tags main HEAD, pushes the tag, and creates the GitHub Release with
@@ -21,9 +23,13 @@ on:
         type: string
         required: true
       manifest:
-        description: Path to the file that holds the version (package.json, pyproject.toml, manifest.json, Cargo.toml).
+        description: Path to the file that holds the version (package.json, pyproject.toml, manifest.json, Cargo.toml, an XcodeGen project.yml, gradle.properties).
         type: string
         required: true
+      manifest-key:
+        description: Key to read from a .yml/.yaml or .properties manifest (defaults MARKETING_VERSION and version). Ignored for .json/.toml.
+        type: string
+        default: ""
       require-workflow:
         description: Name of a check workflow that must have succeeded on main HEAD (empty to skip).
         type: string
@@ -70,24 +76,46 @@ jobs:
           fi
 
       - name: Checkout main
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: main
           fetch-depth: 0
           fetch-tags: true
 
+      # Version lookup by manifest type:
+      #   .json        .version
+      #   .toml        [project], [package] or [tool.poetry] version
+      #   .yml/.yaml   every `<key>:` line at any indentation (top level or nested under
+      #                settings/targets), key default MARKETING_VERSION; all occurrences
+      #                must agree. App Store versions are numeric, so a pre-release
+      #                version (1.4.2-beta1) matches a manifest holding its X.Y.Z (1.4.2).
+      #   .properties  the `<key>=` line, key default version (e.g. wjm.versionName)
       - name: Verify the manifest on main carries this version
         shell: bash
         env:
           VERSION: ${{ inputs.version }}
           MANIFEST: ${{ inputs.manifest }}
+          MANIFEST_KEY: ${{ inputs.manifest-key }}
         run: |
           set -euo pipefail
           if [ ! -f "$MANIFEST" ]; then
             echo "::error::Manifest '$MANIFEST' not found on main"
             exit 1
           fi
+          expected="$VERSION"
           case "$MANIFEST" in
+            *.yml|*.yaml)
+              key="${MANIFEST_KEY:-MARKETING_VERSION}"
+              values="$(sed -nE "s/^[[:space:]]*${key//./\\.}:[[:space:]]*[\"']?([^\"'#[:space:]]+)[\"']?[[:space:]]*(#.*)?$/\1/p" "$MANIFEST" | sort -u)"
+              if [ "$(printf '%s' "$values" | grep -c . || true)" -gt 1 ]; then
+                echo "::error::$MANIFEST declares different ${key} values: $(echo "$values" | tr '\n' ' ')"
+                exit 1
+              fi
+              found="$values"
+              expected="${VERSION%%-*}" ;;
+            *.properties)
+              key="${MANIFEST_KEY:-version}"
+              found="$(sed -nE "s/^[[:space:]]*${key//./\\.}[[:space:]]*[=:][[:space:]]*([^[:space:]]+)[[:space:]]*$/\1/p" "$MANIFEST" | tail -n 1)" ;;
             *.json)
               found="$(jq -r '.version // empty' "$MANIFEST")" ;;
             *.toml)
@@ -105,15 +133,15 @@ jobs:
           PY
           )" ;;
             *)
-              echo "::error::Unsupported manifest type '$MANIFEST' (expected .json or .toml)"
+              echo "::error::Unsupported manifest type '$MANIFEST' (expected .json, .toml, .yml/.yaml or .properties)"
               exit 1 ;;
           esac
           if [ -z "$found" ]; then
             echo "::error::No version field found in $MANIFEST"
             exit 1
           fi
-          if [ "$found" != "$VERSION" ]; then
-            echo "::error::$MANIFEST on main is $found, not $VERSION. Bump it, merge to main, then re-run."
+          if [ "$found" != "$expected" ]; then
+            echo "::error::$MANIFEST on main is $found, not $expected. Bump it, merge to main, then re-run."
             exit 1
           fi
           echo "$MANIFEST on main is $found"

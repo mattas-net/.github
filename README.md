@@ -5,7 +5,8 @@ the same release flow:
 
 1. Push to `main` → the repo's checks workflow runs automatically.
 2. Bump the version in the manifest (`package.json`, `pyproject.toml`,
-   `manifest.json`), merge to `main`.
+   `manifest.json`; for mobile apps the XcodeGen `project.yml` or
+   `gradle.properties`), merge to `main`.
 3. Actions → Release → Run workflow → enter the version (bare semver: `1.4.2`
    or `1.4.2-beta1`, never `v1.4.2`).
 4. `create-release.yml` verifies the manifest on `main` matches, that no tag
@@ -19,8 +20,17 @@ Nothing is tagged when a check fails, so fix the manifest and re-run.
 ### create-release.yml
 
 `workflow_call` inputs: `version` (required), `manifest` (required path),
-`require-workflow` (name of the checks workflow; empty skips the gate),
-`title-prefix`. Outputs `tag` and `prerelease`.
+`manifest-key`, `require-workflow` (name of the checks workflow; empty skips
+the gate), `title-prefix`. Outputs `tag` and `prerelease`.
+
+Version lookup by manifest type:
+
+| Manifest | Read from |
+|---|---|
+| `.json` | `.version` |
+| `.toml` | `[project]`, `[package]` or `[tool.poetry]` `version` |
+| `.yml` / `.yaml` | every `<manifest-key>:` line (default `MARKETING_VERSION`) at any indentation, so top level or nested under `settings`/`targets`; all must agree. A pre-release `1.4.2-beta1` matches `1.4.2`, because App Store versions are numeric. |
+| `.properties` | the `<manifest-key>=` line (default `version`), e.g. `wjm.versionName` |
 
 ### node-ci.yml
 
@@ -118,3 +128,261 @@ jobs:
 Used by: mattas-net-next, anthonymattas-com-next, adhdbytes-com-next,
 law18-app-next, we-just-might-next, mattas-net-strapi; calendar-mcp,
 homeassistant-mcp, ics-combiner, todoist-mcp, hass-dmp, pydmp.
+
+## Mobile
+
+The iOS and Android apps use the same release flow: bump the manifest,
+merge, then Actions → Release → Run workflow with the version.
+`create-release.yml` tags `main` and creates the GitHub Release, then the
+platform job builds that tag, uploads it to the store and attaches the binary
+to the release.
+
+- **Tags** are bare semver: `1.4.2`, or a pre-release `1.4.2-alpha1`,
+  `1.4.2-beta1`, `1.4.2-rc1` (`-beta.1` style works too), never `v1.4.2`.
+- **Build number** (iOS `CURRENT_PROJECT_VERSION`, Android `versionCode`) is
+  derived from the tag only and is strictly monotonic:
+  `MAJOR*1000000 + MINOR*10000 + PATCH*100 + N`, where N orders the builds of
+  one version:
+
+  | Suffix | N |
+  |---|---|
+  | `-alphaK` / `-alpha.K` | K, 1–30 |
+  | `-betaK` / `-beta.K` | 30+K, 31–60 |
+  | `-rcK` / `-rc.K` | 60+K, 61–98 |
+  | none (final release) | 99 |
+
+  So `1.4.2-beta1` → `1040231`, `1.4.2-rc1` → `1040261`, `1.4.2` →
+  `1040299`, and every later version sorts above all of them. Any other
+  suffix, a K out of range, MINOR or PATCH above 99, or MAJOR above 2099
+  (Play's versionCode ceiling) fails the release job. No build-number tags are
+  pushed and nothing is committed: the release workflow stamps the numbers on
+  the runner only.
+- **A rejected suffix fails after tagging.** `create-release.yml` accepts any
+  semver suffix (it also serves the web sites), so check the suffix before
+  starting a mobile release; an unsupported one leaves a tag and a GitHub
+  Release with no build to delete by hand.
+- **Pre-release** versions (hyphen suffix) go to TestFlight / the Play
+  `internal` track only. Stable versions go to App Store Connect (TestFlight;
+  review submission stays a manual step) and to the Play track the caller
+  names.
+- **iOS marketing version** is the tag's `X.Y.Z` (App Store versions cannot
+  carry a suffix), so the manifest for `1.4.2-beta1` holds `1.4.2`.
+- **CI** runs on macOS runners, so it never runs on push. Pull requests wait
+  at the `approve` job until a reviewer approves the `approval` environment;
+  `workflow_dispatch` runs it on any branch. The release workflow always runs
+  the checks on the tag before archiving, and that is why the mobile callers
+  pass `require-workflow: ""`.
+
+| Platform | Manifest | `manifest-key` |
+|---|---|---|
+| iOS (XcodeGen) | `<project-dir>/project.yml` | `MARKETING_VERSION` (default) |
+| Android | `gradle.properties` | the property the build reads `versionName` from, e.g. `wjm.versionName` |
+
+### ios-ci.yml
+
+Jobs (all `macos-26`): `test` (`swift test` in `package-path`, then
+`test-commands`), `lint` (pinned, digest-verified SwiftLint), `app-build`
+(compile-only `xcodebuild build`, signing off), `app-test` (`xcodebuild test`
+on the newest iPhone simulator, or the Mac) and `archive-validate` (signed
+archive + export, only on `refs/heads/main`). `platform: macOS` switches the
+destinations for a Mac app (no caller uses it today). Each check job publishes `<job>-result`, so a
+repo whose ruleset requires a bare check name can keep a thin job of that
+name (see the thin `test` job under the caller templates).
+
+Main inputs: `project-dir`, `xcodegen` (false for a checked-in .xcodeproj),
+`xcode-version` / `xcode-version-file`, `package-path`, `swift-test-args`,
+`test-commands`, `test-env`, `lint-dir`, `lint-args`, `swiftlint-version` /
+`swiftlint-sha256`, `app-scheme` (required), `app-build`,
+`app-build-commands`, `app-test`, `app-test-args`, `archive-validate`,
+`archive-scheme`, `export-options`, `bundle-id`, `signing-overrides`,
+`google-service-info-plist`, `rust-core-ref`.
+
+### ios-release.yml
+
+Runs `ios-ci.yml` on the tag (`verify`, default true), then on `macos-26` in
+the `Deploy` environment: stamps `MARKETING_VERSION` and
+`CURRENT_PROJECT_VERSION` into `project.yml`, generates the project, installs
+the signing assets (`.github/actions/apple-signing`), archives `scheme`,
+exports with `export-options` (teamID and provisioningProfiles are filled
+from the installed profiles), uploads with `xcodebuild -exportArchive`
+(destination upload, App Store Connect API key), and attaches
+`<repo>-<version>.ipa` and `<repo>-<version>-dSYMs.zip` to the release.
+`signing-overrides: true` passes the team and profile on the archive command
+line (We Just Might); leave it false when `project.yml` sets release signing
+per target (law18, oh-toto) so SwiftPM dependency targets are not forced onto
+the app profile. `release-check-commands` run before anything builds.
+
+### android-ci.yml
+
+One `check` job on `ubuntu-24.04`: JDK (`java-version`, 17), Gradle, then
+`gradle-tasks` (default `test<Flavor>DebugUnitTest lint<Flavor>Debug
+assemble<Flavor>Debug`) with `gradle-args`. Publishes `check-result`.
+
+### android-release.yml
+
+Runs `android-ci.yml` on the tag, then on `ubuntu-24.04` in the `Deploy`
+environment: writes `keystore.properties` from the `UPLOAD_KEYSTORE_*`
+secrets, runs `bundle<Flavor>Release` with
+`-P<version-name-property>=<version>` and
+`-P<version-code-property>=<derived number>` (plus
+`-P<build-number-property>` when set), uploads to Play with
+`r0adkll/upload-google-play` (`prerelease-track`, default `internal`, for a
+pre-release; `track` otherwise; `release-status`), and attaches
+`<repo>-<version>.aab` (and the R8 mapping) to the release.
+
+### Rust core (We Just Might)
+
+`rust-core-ref` names a file holding the `we-just-might-core` commit
+(`scripts/core-ref`) or the SHA itself. The workflows then run the core
+repo's own composite action
+(`mattas-net/we-just-might-core/.github/actions/build-ios@main` or
+`build-android@main`), which checks the core out at that commit into
+`../we-just-might-core` with the `WJM_CORE_DEPLOY_KEY` deploy key and builds
+it. The core repository must allow Actions access from mattas-net
+repositories (Settings → Actions → General → Access).
+
+### Secrets
+
+Pass them with `secrets: inherit`. Repository secrets work everywhere; a
+secret stored only in the `Deploy` environment is visible to the upload job
+but not to the CI run before it, so keep `WJM_CORE_DEPLOY_KEY` at repository
+level.
+
+| Secret | Used by |
+|---|---|
+| `DISTRIBUTION_CERT_P12_BASE64` | iOS: base64 PKCS#12 Apple Distribution certificate |
+| `DISTRIBUTION_CERT_PASSWORD` | iOS: its password |
+| `PROVISIONING_PROFILE_BASE64` | iOS: base64 App Store profile for the app |
+| `EXTRA_PROVISIONING_PROFILE_BASE64` | iOS, optional: a second profile (app extension) |
+| `ASC_KEY_ID`, `ASC_ISSUER_ID`, `ASC_KEY_P8` | iOS: App Store Connect API key (App Manager role) |
+| `GOOGLE_SERVICE_INFO_PLIST_BASE64` | iOS, with `google-service-info-plist` |
+| `UPLOAD_KEYSTORE_BASE64`, `UPLOAD_KEYSTORE_PASSWORD`, `UPLOAD_KEY_ALIAS`, `UPLOAD_KEY_PASSWORD` | Android: Play upload key |
+| `PLAY_SERVICE_ACCOUNT_JSON` | Android: Play service account key (release manager on the app) |
+| `GOOGLE_SERVICES_JSON_BASE64` | Android, with `google-services-json` |
+| `WJM_CORE_DEPLOY_KEY` | We Just Might: read-only deploy key for `we-just-might-core` |
+
+### Mobile caller templates
+
+`.github/workflows/checks.yml` (iOS)
+
+```yaml
+name: Checks
+on:
+  pull_request:
+  workflow_dispatch:
+concurrency:
+  group: checks-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  approve:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
+    environment: approval
+    steps:
+      - run: echo "Checks approved by ${GITHUB_TRIGGERING_ACTOR}"
+  ios:
+    needs: approve
+    if: always() && needs.approve.result != 'failure' && needs.approve.result != 'cancelled'
+    uses: mattas-net/.github/.github/workflows/ios-ci.yml@main
+    permissions:
+      contents: read
+    secrets: inherit
+    with:
+      project-dir: src
+      package-path: src/MyApp
+      lint-dir: src
+      app-scheme: MyApp
+```
+
+A ruleset that requires bare check names (`test`, `lint`) keeps thin jobs
+with those ids that read the reusable workflow's results:
+
+```yaml
+  test:
+    needs: ios
+    # always(): a rejected approval or failed shared job must report failure, not a skip
+    # (a skipped required check counts as passing).
+    if: always()
+    runs-on: ubuntu-24.04
+    steps:
+      - env:
+          RESULT: ${{ needs.ios.outputs.test-result }}
+        run: test "$RESULT" = success
+```
+
+`.github/workflows/release.yml` (iOS)
+
+```yaml
+name: Release
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Version to release (bare semver, e.g. 1.4.2 or 1.4.2-beta1)
+        required: true
+        type: string
+jobs:
+  release:
+    uses: mattas-net/.github/.github/workflows/create-release.yml@main
+    permissions:
+      contents: write
+      actions: read
+    with:
+      version: ${{ inputs.version }}
+      manifest: src/project.yml
+      require-workflow: ""
+  ios:
+    needs: release
+    uses: mattas-net/.github/.github/workflows/ios-release.yml@main
+    permissions:
+      contents: write
+    secrets: inherit
+    with:
+      version: ${{ inputs.version }}
+      project-dir: src
+      scheme: MyApp
+      package-path: src/MyApp
+      lint-dir: src
+```
+
+`.github/workflows/checks.yml` and `release.yml` (Android): the same shape
+with `android-ci.yml` (job id `check`) and
+
+```yaml
+  release:
+    uses: mattas-net/.github/.github/workflows/create-release.yml@main
+    permissions:
+      contents: write
+      actions: read
+    with:
+      version: ${{ inputs.version }}
+      manifest: gradle.properties
+      manifest-key: myapp.versionName
+      require-workflow: ""
+  android:
+    needs: release
+    uses: mattas-net/.github/.github/workflows/android-release.yml@main
+    permissions:
+      contents: write
+    secrets: inherit
+    with:
+      version: ${{ inputs.version }}
+      package-name: net.mattas.myapp
+      track: internal
+      version-name-property: myapp.versionName
+      version-code-property: myapp.versionCode
+```
+
+### Store prerequisites
+
+- App Store Connect: the app record exists for the bundle id, and the API key
+  has the App Manager role. A new marketing version needs no manual step;
+  the upload creates it.
+- Google Play: the app exists in the Play Console, the first bundle was
+  uploaded by hand (the API cannot create an app), the service account has
+  release permissions for it, and Play App Signing is enabled with the upload
+  key in `UPLOAD_KEYSTORE_*`. An app still in draft needs
+  `release-status: draft`.
+
+Used by: we-just-might-ios, law18-ios, oh-toto, ok-rocket (CI only),
+we-just-might-android, law18-android.

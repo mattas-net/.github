@@ -1,0 +1,117 @@
+name: Install Apple signing assets
+description: >
+  Create a temporary keychain holding the Apple Distribution certificate and install the
+  App Store provisioning profile(s) for one job. Used by ios-ci.yml (archive-validate) and
+  ios-release.yml; callers must run the matching cleanup step with if: always().
+
+# Exports to later steps (GITHUB_ENV):
+#   SIGNING_KEYCHAIN_PATH            temporary keychain (delete it in cleanup)
+#   SIGNING_PROFILE_PATHS            installed profile files, newline-separated (delete them)
+#   SIGNING_TEAM_ID                  team of the main profile
+#   SIGNING_PROFILE_NAME             name of the main profile
+#   SIGNING_APPLICATION_IDENTIFIER   bundle id the main profile signs (team prefix removed)
+#   SIGNING_PROFILES_TSV             file of "<bundle id>\t<profile name>" lines, one per profile,
+#                                    used to fill ExportOptions.plist provisioningProfiles
+# Nothing secret is echoed: only profile names, team id and bundle ids are logged.
+inputs:
+  certificate-p12-base64:
+    description: Base64-encoded PKCS#12 Apple Distribution certificate (DISTRIBUTION_CERT_P12_BASE64).
+    required: true
+  certificate-password:
+    description: Password for the PKCS#12 certificate (DISTRIBUTION_CERT_PASSWORD).
+    required: true
+  profile-base64:
+    description: Base64-encoded App Store provisioning profile for the app (PROVISIONING_PROFILE_BASE64).
+    required: true
+  extra-profile-base64:
+    description: Optional second profile, e.g. for an app extension (EXTRA_PROVISIONING_PROFILE_BASE64).
+    required: false
+    default: ""
+  bundle-id:
+    description: When set, the main profile's application identifier must equal <team>.<bundle-id>.
+    required: false
+    default: ""
+
+runs:
+  using: composite
+  steps:
+    - name: Create temporary keychain and install signing assets
+      shell: bash
+      env:
+        CERT_BASE64: ${{ inputs.certificate-p12-base64 }}
+        CERT_PASSWORD: ${{ inputs.certificate-password }}
+        PROFILE_BASE64: ${{ inputs.profile-base64 }}
+        EXTRA_PROFILE_BASE64: ${{ inputs.extra-profile-base64 }}
+        EXPECTED_BUNDLE_ID: ${{ inputs.bundle-id }}
+      run: |
+        set -euo pipefail
+        for variable in CERT_BASE64 CERT_PASSWORD PROFILE_BASE64; do
+          if [ -z "${!variable:-}" ]; then
+            echo "::error::$variable is empty: set DISTRIBUTION_CERT_P12_BASE64, DISTRIBUTION_CERT_PASSWORD and PROVISIONING_PROFILE_BASE64"
+            exit 1
+          fi
+        done
+
+        keychain_path="$RUNNER_TEMP/app-signing.keychain-db"
+        keychain_password="$(openssl rand -base64 32)"
+        certificate_path="$(mktemp "$RUNNER_TEMP/distribution.XXXXXX")"
+        trap 'rm -f "$certificate_path"' EXIT
+        echo "SIGNING_KEYCHAIN_PATH=$keychain_path" >> "$GITHUB_ENV"
+
+        printf '%s' "$CERT_BASE64" | base64 --decode > "$certificate_path"
+        test -s "$certificate_path"
+        security create-keychain -p "$keychain_password" "$keychain_path"
+        security set-keychain-settings -lut 21600 "$keychain_path"
+        security unlock-keychain -p "$keychain_password" "$keychain_path"
+        security import "$certificate_path" -P "$CERT_PASSWORD" -A -t cert -f pkcs12 -k "$keychain_path"
+        security set-key-partition-list -S apple-tool:,apple: -k "$keychain_password" "$keychain_path" >/dev/null
+        security list-keychains -d user -s "$keychain_path" login.keychain-db
+
+        installed_directory="$HOME/Library/MobileDevice/Provisioning Profiles"
+        mkdir -p "$installed_directory"
+        tsv="$RUNNER_TEMP/signing-profiles.tsv"
+        : > "$tsv"
+        installed_paths=""
+
+        install_profile() {
+          local encoded="$1" role="$2" profile_path profile_plist uuid name team application_identifier bundle_id installed
+          profile_path="$(mktemp "$RUNNER_TEMP/profile.XXXXXX")"
+          printf '%s' "$encoded" | base64 --decode > "$profile_path"
+          test -s "$profile_path"
+          profile_plist="$(security cms -D -i "$profile_path")"
+          uuid="$(/usr/libexec/PlistBuddy -c 'Print :UUID' /dev/stdin <<< "$profile_plist")"
+          name="$(/usr/libexec/PlistBuddy -c 'Print :Name' /dev/stdin <<< "$profile_plist")"
+          team="$(/usr/libexec/PlistBuddy -c 'Print :TeamIdentifier:0' /dev/stdin <<< "$profile_plist")"
+          application_identifier="$(/usr/libexec/PlistBuddy -c 'Print :Entitlements:application-identifier' /dev/stdin <<< "$profile_plist")"
+          bundle_id="${application_identifier#"$team".}"
+          installed="$installed_directory/$uuid.mobileprovision"
+          cp "$profile_path" "$installed"
+          rm -f "$profile_path"
+          printf '%s\t%s\n' "$bundle_id" "$name" >> "$tsv"
+          installed_paths="${installed_paths}${installed}"$'\n'
+          echo "Installed $role profile '$name' for $bundle_id (team $team)"
+          if [ "$role" = "main" ]; then
+            if [ -n "$EXPECTED_BUNDLE_ID" ] && [ "$bundle_id" != "$EXPECTED_BUNDLE_ID" ]; then
+              echo "::error::the provisioning profile signs $bundle_id, expected $EXPECTED_BUNDLE_ID"
+              exit 1
+            fi
+            {
+              echo "SIGNING_TEAM_ID=$team"
+              echo "SIGNING_PROFILE_NAME=$name"
+              echo "SIGNING_APPLICATION_IDENTIFIER=$bundle_id"
+            } >> "$GITHUB_ENV"
+          fi
+        }
+
+        install_profile "$PROFILE_BASE64" main
+        if [ -n "$EXTRA_PROFILE_BASE64" ]; then
+          install_profile "$EXTRA_PROFILE_BASE64" extra
+        fi
+
+        delimiter="EOF_$(openssl rand -hex 8)"
+        {
+          echo "SIGNING_PROFILES_TSV=$tsv"
+          echo "SIGNING_PROFILE_PATHS<<$delimiter"
+          printf '%s' "$installed_paths"
+          echo "$delimiter"
+        } >> "$GITHUB_ENV"
