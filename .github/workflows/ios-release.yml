@@ -4,10 +4,13 @@ name: iOS Release (reusable)
 # The caller's release.yml chains it after create-release.yml (needs: release) with
 # `version` set to the new tag. This workflow:
 #   1. runs ios-ci.yml on the tag (verify: true), the one place the macOS checks always run;
-#   2. derives the build number from the tag: MAJOR*1000000 + MINOR*10000 + PATCH*100 + N,
-#      N = 1-30 for -alphaK, 31-60 for -betaK, 61-98 for -rcK, 99 for the final release
-#      (1.4.2-beta1 -> 1040231, 1.4.2-rc1 -> 1040261, 1.4.2 -> 1040299), strictly increasing within a
-#      version: the final release sorts after its pre-releases; any other suffix fails the run;
+#   2. derives the build number as YYYYMMDD*100 + NN: the UTC date the job runs, and NN
+#      (01-99) = this release's position among the repo's GitHub Releases published that UTC
+#      day, by publishedAt (the day's first release -> 2026102901). It does not depend on the
+#      version: whatever was released most recently has the highest number and is the one
+#      that ships. A rerun of the same tag on the same day recomputes the same number (a
+#      release published later sorts after it), unless a release published earlier that day
+#      was deleted, which shifts the count down; a rerun on a later day fails;
 #   3. stamps MARKETING_VERSION (X.Y.Z, suffix removed: App Store versions are numeric) and
 #      CURRENT_PROJECT_VERSION into project.yml on the runner only (never committed), or
 #      passes them as build settings when the project is checked in (xcodegen: false);
@@ -239,6 +242,7 @@ jobs:
         id: version
         shell: bash
         env:
+          GH_TOKEN: ${{ github.token }}
           VERSION: ${{ inputs.version }}
         run: |
           set -euo pipefail
@@ -246,44 +250,38 @@ jobs:
             echo "::error::'$VERSION' is not bare semver (X.Y.Z or X.Y.Z-suffix; no v prefix)"
             exit 1
           fi
-          major="${BASH_REMATCH[1]}"; minor="${BASH_REMATCH[2]}"; patch="${BASH_REMATCH[3]}"
-          suffix="${BASH_REMATCH[4]#-}"
-          if [ "$minor" -gt 99 ] || [ "$patch" -gt 99 ]; then
-            echo "::error::MINOR and PATCH must be <= 99 for the MAJOR*1000000+MINOR*10000+PATCH*100+N build number"
+          marketing="${BASH_REMATCH[1]}.${BASH_REMATCH[2]}.${BASH_REMATCH[3]}"
+          # Build number = YYYYMMDD*100 + NN: today's UTC date, and NN = this release's 1-based
+          # position among the repo's GitHub Releases published today (UTC), by publishedAt.
+          # create-release.yml has already published this release, so the day's first is 01.
+          # The number is not derived from the version: the most recent build is the one that
+          # ships, final or pre-release alike. A rerun of the same tag on the same day gets the
+          # same number: releases published after it sort after it. Deleting an earlier release
+          # of the same day shifts the count down, and a rerun on a later day finds no position.
+          today="$(date -u +%Y-%m-%d)"
+          releases="$(gh release list --repo "$GITHUB_REPOSITORY" --limit 200 --json tagName,publishedAt,isDraft)"
+          position="$(jq -r --arg day "$today" --arg tag "$VERSION" '
+            [.[] | select((.isDraft | not) and .publishedAt != null and (.publishedAt | startswith($day)))]
+            | sort_by(.publishedAt, .tagName) | map(.tagName) | index($tag) // empty' <<< "$releases")"
+          if [ -z "$position" ]; then
+            published="$(jq -r --arg tag "$VERSION" '[.[] | select(.tagName == $tag) | .publishedAt // "never (draft or missing)"] | first // "never (no such release)"' <<< "$releases")"
+            echo "::error::Release $VERSION was published $published, not on $today (UTC), so it has no position in today's releases and no build number. Numbers come from the day a release is published; release a new version instead of re-running this one on a later day."
             exit 1
           fi
-          if [ "$major" -gt 2099 ]; then
-            echo "::error::MAJOR must be <= 2099 (Play caps versionCode at 2100000000)"
+          nn=$(( position + 1 ))
+          if [ "$nn" -gt 99 ]; then
+            echo "::error::$VERSION is release number $nn of $today (UTC); the YYYYMMDDNN build number allows 99 per day"
             exit 1
           fi
-          # N orders the builds of one X.Y.Z: alpha 1-30, beta 31-60, rc 61-98, final 99.
-          if [ -z "$suffix" ]; then
-            n=99
-          elif [[ "$suffix" =~ ^(alpha|beta|rc)\.?([1-9][0-9]*)$ ]]; then
-            kind="${BASH_REMATCH[1]}"; k="${BASH_REMATCH[2]}"
-            case "$kind" in
-              alpha) base=0; max=30 ;;
-              beta) base=30; max=30 ;;
-              rc) base=60; max=38 ;;
-            esac
-            if [ "${#k}" -gt 2 ] || [ "$k" -gt "$max" ]; then
-              echo "::error::-$kind$k is out of range: $kind numbers run from 1 to $max"
-              exit 1
-            fi
-            n=$(( base + k ))
-          else
-            echo "::error::pre-release suffix '-$suffix' is not supported: use -alphaK, -betaK or -rcK (or -alpha.K, -beta.K, -rc.K), K from 1"
-            exit 1
-          fi
-          build=$(( major * 1000000 + minor * 10000 + patch * 100 + n ))
+          build="${today//-/}$(printf '%02d' "$nn")"
           prerelease=false
           [[ "$VERSION" == *-* ]] && prerelease=true
           {
-            echo "marketing=$major.$minor.$patch"
+            echo "marketing=$marketing"
             echo "build=$build"
             echo "prerelease=$prerelease"
           } >> "$GITHUB_OUTPUT"
-          echo "Version $VERSION -> MARKETING_VERSION $major.$minor.$patch, CURRENT_PROJECT_VERSION $build (pre-release: $prerelease)"
+          echo "Version $VERSION -> MARKETING_VERSION $marketing, CURRENT_PROJECT_VERSION $build (pre-release: $prerelease)"
 
       - name: Checkout the release tag
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
