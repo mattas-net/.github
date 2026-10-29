@@ -5,12 +5,12 @@ Shared GitHub Actions for the mattas-net organization.
 ## docker-build-push.yml (reusable)
 
 Builds a site's Dockerfile and pushes it to `ghcr.io/mattas-net/<repo>` tagged
-with the release tag (for example `v1.4.0`) plus `latest`, unless the release is
+with the release tag (for example `1.4.0`) plus `latest`, unless the release is
 marked pre-release. Runs lint, typecheck, test and `npm audit` first when the
 scripts exist.
 
 Release flow: merge to `main`, then publish a release (`gh release create
-v1.4.0 --generate-notes`). GitHub creates the tag and the caller fires. A manual
+1.4.0 --generate-notes`). GitHub creates the tag and the caller fires. A manual
 dispatch from an existing tag rebuilds it; a dispatch from a branch does nothing.
 
 Caller (`.github/workflows/docker-build-push.yml` in each site repo):
