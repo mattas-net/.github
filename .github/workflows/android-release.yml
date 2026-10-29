@@ -4,13 +4,13 @@ name: Android Release (reusable)
 # The caller's release.yml chains it after create-release.yml (needs: release) with
 # `version` set to the new tag. This workflow:
 #   1. runs android-ci.yml on the tag (verify: true);
-#   2. derives versionCode as YYYYMMDD*100 + NN: the UTC date the job runs, and NN
-#      (01-99) = this release's position among the repo's GitHub Releases published that UTC
-#      day, by publishedAt (the day's first release -> 2026102901). It does not depend on the
-#      version: whatever was released most recently has the highest number and is the one
-#      that ships. A rerun of the same tag on the same day recomputes the same number (a
-#      release published later sorts after it), unless a release published earlier that day
-#      was deleted, which shifts the count down; a rerun on a later day fails;
+#   2. derives versionCode as YYYYMMDD*100 + NN: the UTC date this release was
+#      published, and NN (01-99) = its position among the repo's GitHub Releases published
+#      that UTC date, by publishedAt (the day's first release -> 2026102901). It does not
+#      depend on the version: whatever was released most recently has the highest number and
+#      is the one that ships. Every run for the same tag, on any day, gets the same number;
+#      only deleting an earlier release of that date shifts the count down. A rerun after a
+#      successful Play upload is rejected by Play for the repeated versionCode;
 #   3. builds the signed bundle with versionName = the tag's X.Y.Z (suffix removed) and
 #      versionCode = that number, passed
 #      as Gradle properties (never committed), signed through keystore.properties from the
@@ -169,29 +169,33 @@ jobs:
             exit 1
           fi
           marketing="${BASH_REMATCH[1]}.${BASH_REMATCH[2]}.${BASH_REMATCH[3]}"
-          # Build number = YYYYMMDD*100 + NN: today's UTC date, and NN = this release's 1-based
-          # position among the repo's GitHub Releases published today (UTC), by publishedAt.
-          # create-release.yml has already published this release, so the day's first is 01.
+          # Build number = YYYYMMDD*100 + NN: the UTC date THIS release was published, and NN =
+          # its 1-based position among the repo's GitHub Releases published that UTC date, by
+          # publishedAt. create-release.yml has already published it, so the day's first is 01.
           # The number is not derived from the version: the most recent build is the one that
-          # ships, final or pre-release alike. A rerun of the same tag on the same day gets the
-          # same number: releases published after it sort after it. Deleting an earlier release
-          # of the same day shifts the count down, and a rerun on a later day finds no position.
-          today="$(date -u +%Y-%m-%d)"
+          # ships, final or pre-release alike. Every run for the same tag, on any day, gets the
+          # same number (releases published after it sort after it); only deleting an earlier
+          # release of the same date shifts the count down.
           releases="$(gh release list --repo "$GITHUB_REPOSITORY" --limit 200 --json tagName,publishedAt,isDraft)"
-          position="$(jq -r --arg day "$today" --arg tag "$VERSION" '
-            [.[] | select((.isDraft | not) and .publishedAt != null and (.publishedAt | startswith($day)))]
-            | sort_by(.publishedAt, .tagName) | map(.tagName) | index($tag) // empty' <<< "$releases")"
-          if [ -z "$position" ]; then
-            published="$(jq -r --arg tag "$VERSION" '[.[] | select(.tagName == $tag) | .publishedAt // "never (draft or missing)"] | first // "never (no such release)"' <<< "$releases")"
-            echo "::error::Release $VERSION was published $published, not on $today (UTC), so it has no position in today's releases and no build number. Numbers come from the day a release is published; release a new version instead of re-running this one on a later day."
+          published="$(jq -r --arg tag "$VERSION" '[.[] | select(.tagName == $tag and (.isDraft | not)) | .publishedAt // empty] | first // empty' <<< "$releases")"
+          if [ -z "$published" ]; then
+            echo "::error::No published GitHub Release for $VERSION (missing, or still a draft); create-release.yml publishes it before this job runs."
             exit 1
           fi
+          day="${published:0:10}"
+          if ! [[ "$day" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]; then
+            echo "::error::Unexpected publishedAt '$published' for $VERSION"
+            exit 1
+          fi
+          position="$(jq -r --arg day "$day" --arg tag "$VERSION" '
+            [.[] | select((.isDraft | not) and .publishedAt != null and (.publishedAt | startswith($day)))]
+            | sort_by(.publishedAt, .tagName) | map(.tagName) | index($tag)' <<< "$releases")"
           nn=$(( position + 1 ))
           if [ "$nn" -gt 99 ]; then
-            echo "::error::$VERSION is release number $nn of $today (UTC); the YYYYMMDDNN build number allows 99 per day"
+            echo "::error::$VERSION is release number $nn published on $day (UTC); the YYYYMMDDNN build number allows 99 per day"
             exit 1
           fi
-          build="${today//-/}$(printf '%02d' "$nn")"
+          build="${day//-/}$(printf '%02d' "$nn")"
           code=$build
           if [[ "$VERSION" == *-* ]]; then
             prerelease=true; track="$PRERELEASE_TRACK"

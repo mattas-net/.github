@@ -140,20 +140,22 @@ to the release.
 - **Tags** are bare semver: `1.4.2`, or a pre-release such as `1.4.2-beta1`,
   never `v1.4.2`.
 - **Build number** (iOS `CURRENT_PROJECT_VERSION`, Android `versionCode`) is
-  not derived from the version. It is `YYYYMMDD*100 + NN`: the UTC date the
-  release job runs, and NN (01–99) is this release's 1-based position among the
-  repository's GitHub Releases published that UTC day, ordered by publishedAt.
-  `create-release.yml` has already published the release when the platform job
-  runs, so the first release on 2026-10-29 builds as `2026102901`, the second
-  as `2026102902`, and the next day starts at `2026103001`. Numbers only grow,
-  and there is no special value for a final release: whatever was released
-  most recently is the one that ships, pre-release or not.
-  - A rerun of the same tag on the same day recomputes the same number, because
-    releases published after it sort after it. Deleting an earlier release of
-    that day shifts the count down and can repeat a number.
-  - A rerun on a later UTC day fails with a clear error (the release was not
-    published that day, so it has no position); release a new version instead.
-  - A 100th release in one UTC day fails.
+  not derived from the version. It is `YYYYMMDD*100 + NN`: the UTC date this
+  release was published (its GitHub Release `publishedAt`), and NN (01–99) is
+  its 1-based position among the repository's GitHub Releases published that
+  UTC date, ordered by publishedAt. `create-release.yml` publishes the release
+  before the platform job runs, so the first release on 2026-10-29 builds as
+  `2026102901`, the second as `2026102902`, and the next day starts at
+  `2026103001`. Numbers only grow, and there is no special value for a final
+  release: whatever was released most recently is the one that ships,
+  pre-release or not.
+  - Every run for the same tag, the same day or any later day, recomputes the
+    same number, because releases published after it sort after it. Deleting
+    an earlier release of that date shifts the count down and can repeat a
+    number.
+  - On Android, a rerun after a successful Play upload is rejected by Play for
+    the repeated versionCode.
+  - A 100th release in one UTC date fails.
 
   No build-number tags are pushed and nothing is committed: the release
   workflow stamps the numbers on the runner only.
