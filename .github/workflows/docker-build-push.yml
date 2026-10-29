@@ -1,33 +1,40 @@
 name: Build and Push Docker Image (reusable)
 
-# Shared by the mattas-net web sites. Callers run it when a GitHub release is
-# published (GitHub creates the tag from the release target) or on a manual
-# dispatch from an existing tag. The image is pushed to ghcr.io/<owner>/<repo>
-# tagged with the release tag, plus `latest` unless the release is a pre-release.
-# The OCI source label links the package to the calling repository.
+# Builds a repo's Dockerfile and pushes it to ghcr.io/<owner>/<repo>.
+# Two ways in:
+#   - a release caller passes `ref` (the tag create-release.yml just made):
+#     the tag is checked out and the image is tagged with it;
+#   - a manual dispatch from an existing tag (rebuild): no `ref` needed.
+# A dispatch from a branch does nothing. `latest` is added unless the tag has a
+# pre-release suffix (1.4.2-beta1). The OCI source label links the package to
+# the repository.
 on:
   workflow_call:
     inputs:
+      ref:
+        description: Tag to build (empty = the ref this run was dispatched from, which must be a tag).
+        type: string
+        default: ""
       build-args:
         description: Newline-separated KEY=VALUE pairs passed to docker build.
         type: string
         default: ""
+      platforms:
+        description: Comma-separated platforms to build (QEMU is set up for non-native ones).
+        type: string
+        default: linux/amd64
+      verify:
+        description: Run node-ci.yml (lint / typecheck / test / audit) before building. Set false for non-Node images or when checks already gate main.
+        type: boolean
+        default: true
       node-version:
-        description: Node major used by the verify job (match the Dockerfile base).
+        description: Passed to node-ci.yml when verify is true.
         type: string
         default: "22"
       npm-ci-args:
-        description: Extra flags for npm ci in the verify job.
+        description: Passed to node-ci.yml when verify is true.
         type: string
         default: "--ignore-scripts"
-      verify:
-        description: Run lint / typecheck / test / audit before building.
-        type: boolean
-        default: true
-      platforms:
-        description: Comma-separated platforms to build.
-        type: string
-        default: linux/amd64
 
 env:
   REGISTRY: ghcr.io
@@ -36,50 +43,53 @@ env:
 # Actions are pinned by commit SHA; the comment names the tag each SHA was resolved from.
 jobs:
   verify:
-    # Only tags map to an image tag; a dispatch from a branch does nothing.
-    if: inputs.verify && github.ref_type == 'tag'
-    runs-on: ubuntu-24.04
+    if: inputs.verify && (inputs.ref != '' || github.ref_type == 'tag')
+    uses: mattas-net/.github/.github/workflows/node-ci.yml@main
     permissions:
       contents: read
-
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-
-      - name: Set up Node
-        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
-        with:
-          node-version: ${{ inputs.node-version }}
-          cache: npm
-
-      - name: Install dependencies
-        run: npm ci ${{ inputs.npm-ci-args }}
-
-      - name: Lint
-        run: npm run lint --if-present
-
-      - name: Type-check
-        run: npm run typecheck --if-present
-
-      - name: Test
-        run: npm test --if-present
-
-      - name: Audit production dependencies
-        run: npm audit --omit=dev --audit-level=high
+    with:
+      node-version: ${{ inputs.node-version }}
+      npm-ci-args: ${{ inputs.npm-ci-args }}
 
   build-and-push:
     needs: verify
     # always() lets the job run when verify was skipped (inputs.verify=false);
     # a failed verify still blocks the build.
-    if: always() && needs.verify.result != 'failure' && needs.verify.result != 'cancelled' && github.ref_type == 'tag'
+    if: always() && needs.verify.result != 'failure' && needs.verify.result != 'cancelled' && (inputs.ref != '' || github.ref_type == 'tag')
     runs-on: ubuntu-24.04
     permissions:
       contents: read
       packages: write
 
     steps:
+      - name: Determine image tags
+        id: vars
+        shell: bash
+        env:
+          IMAGE: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          REF_INPUT: ${{ inputs.ref }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          tag="${REF_INPUT:-$REF_NAME}"
+          echo "ref=$tag" >> "$GITHUB_OUTPUT"
+          tags="${IMAGE}:${tag}"
+          if [[ "$tag" != *-* ]]; then
+            tags="${tags}"$'\n'"${IMAGE}:latest"
+          fi
+          {
+            echo "tags<<EOF"
+            echo "$tags"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
       - name: Checkout repository
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ steps.vars.outputs.ref }}
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3.7.0
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
@@ -92,25 +102,6 @@ jobs:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Determine image tags
-        id: vars
-        shell: bash
-        env:
-          IMAGE: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
-          TAG: ${{ github.ref_name }}
-          # On a manual dispatch there is no release payload; treat it as a full release.
-          PRERELEASE: ${{ github.event_name == 'release' && github.event.release.prerelease }}
-        run: |
-          tags="${IMAGE}:${TAG}"
-          if [ "$PRERELEASE" != "true" ]; then
-            tags="${tags}"$'\n'"${IMAGE}:latest"
-          fi
-          {
-            echo "tags<<EOF"
-            echo "$tags"
-            echo "EOF"
-          } >> "$GITHUB_OUTPUT"
 
       - name: Extract metadata for Docker
         id: meta

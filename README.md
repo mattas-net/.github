@@ -1,25 +1,95 @@
 # mattas-net/.github
 
-Shared GitHub Actions for the mattas-net organization.
+Shared GitHub Actions for the mattas-net organization. Every project follows
+the same release flow:
 
-## docker-build-push.yml (reusable)
+1. Push to `main` → the repo's checks workflow runs automatically.
+2. Bump the version in the manifest (`package.json`, `pyproject.toml`,
+   `manifest.json`), merge to `main`.
+3. Actions → Release → Run workflow → enter the version (bare semver: `1.4.2`
+   or `1.4.2-beta1`, never `v1.4.2`).
+4. `create-release.yml` verifies the manifest on `main` matches, that no tag
+   exists, and that the checks passed on `main` HEAD; then it tags `main`,
+   creates the GitHub Release, and the caller chains the build/publish job.
 
-Builds a site's Dockerfile and pushes it to `ghcr.io/mattas-net/<repo>` tagged
-with the release tag (for example `1.4.0`) plus `latest`, unless the release is
-marked pre-release. Runs lint, typecheck, test and `npm audit` first when the
-scripts exist.
+Nothing is tagged when a check fails, so fix the manifest and re-run.
 
-Release flow: merge to `main`, then publish a release (`gh release create
-1.4.0 --generate-notes`). GitHub creates the tag and the caller fires. A manual
-dispatch from an existing tag rebuilds it; a dispatch from a branch does nothing.
+## Workflows
 
-Caller (`.github/workflows/docker-build-push.yml` in each site repo):
+### create-release.yml
+
+`workflow_call` inputs: `version` (required), `manifest` (required path),
+`require-workflow` (name of the checks workflow; empty skips the gate),
+`title-prefix`. Outputs `tag` and `prerelease`.
+
+### node-ci.yml
+
+Lint / typecheck / test (each `--if-present`) and
+`npm audit --omit=dev --audit-level=<audit-level>`. Inputs: `node-version`
+(22), `npm-ci-args` (`--ignore-scripts`), `audit-level` (high).
+
+### docker-build-push.yml
+
+Builds the Dockerfile and pushes `ghcr.io/mattas-net/<repo>:<tag>` plus
+`latest` (skipped for pre-release tags). Inputs: `ref` (tag to build; empty
+means the run was dispatched from a tag), `build-args`, `platforms`
+(`linux/amd64`; QEMU is set up for others), `verify` (run node-ci first),
+`node-version`, `npm-ci-args`.
+
+## Caller templates
+
+`.github/workflows/checks.yml`
 
 ```yaml
-name: Build and Push Docker Image
+name: Checks
 on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+jobs:
+  node:
+    uses: mattas-net/.github/.github/workflows/node-ci.yml@main
+    permissions:
+      contents: read
+```
+
+`.github/workflows/release.yml`
+
+```yaml
+name: Release
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Version to release (bare semver, e.g. 1.4.2)
+        required: true
+        type: string
+jobs:
   release:
-    types: [published]
+    uses: mattas-net/.github/.github/workflows/create-release.yml@main
+    permissions:
+      contents: write
+      actions: read
+    with:
+      version: ${{ inputs.version }}
+      manifest: package.json
+      require-workflow: Checks
+  image:
+    needs: release
+    uses: mattas-net/.github/.github/workflows/docker-build-push.yml@main
+    permissions:
+      contents: read
+      packages: write
+    with:
+      ref: ${{ inputs.version }}
+      verify: false
+```
+
+`.github/workflows/docker-build-push.yml` (manual rebuild of an existing tag)
+
+```yaml
+name: Rebuild Docker Image
+on:
   workflow_dispatch:
 jobs:
   image:
@@ -27,15 +97,8 @@ jobs:
     permissions:
       contents: read
       packages: write
-    with:
-      node-version: "22"
-      build-args: |
-        NEXT_PUBLIC_EXAMPLE=${{ vars.EXAMPLE }}
 ```
 
-Inputs: `build-args`, `node-version` (default 22), `npm-ci-args`
-(default `--ignore-scripts`), `verify` (default true), `platforms`
-(default `linux/amd64`).
-
 Used by: mattas-net-next, anthonymattas-com-next, adhdbytes-com-next,
-law18-app-next, we-just-might-next.
+law18-app-next, we-just-might-next, mattas-net-strapi; calendar-mcp,
+homeassistant-mcp, ics-combiner, todoist-mcp, hass-dmp, pydmp.

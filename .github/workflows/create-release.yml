@@ -1,0 +1,177 @@
+name: Create Release (reusable)
+
+# Shared release entry point. The caller is a workflow_dispatch that takes a
+# `version` input and passes it here. This workflow:
+#   1. validates the version is bare semver (1.4.2 or 1.4.2-beta1, never v1.4.2),
+#   2. checks out main and refuses to continue unless the manifest on main
+#      already carries exactly that version (bump it, merge, re-run),
+#   3. refuses if the tag (or a legacy v-tag) already exists,
+#   4. optionally requires the named check workflow to have succeeded on main HEAD,
+#   5. tags main HEAD, pushes the tag, and creates the GitHub Release with
+#      generated notes (pre-release when the version has a hyphen suffix).
+# Nothing is tagged if any check fails, so the run can simply be repeated.
+#
+# A release created with GITHUB_TOKEN does not fire `release:` events in other
+# workflows; callers chain the build job after this one (needs:) instead.
+on:
+  workflow_call:
+    inputs:
+      version:
+        description: Bare semver to release, e.g. 1.4.2 or 1.4.2-beta1.
+        type: string
+        required: true
+      manifest:
+        description: Path to the file that holds the version (package.json, pyproject.toml, manifest.json, Cargo.toml).
+        type: string
+        required: true
+      require-workflow:
+        description: Name of a check workflow that must have succeeded on main HEAD (empty to skip).
+        type: string
+        default: ""
+      title-prefix:
+        description: Text placed before the version in the release title (defaults to the repo name).
+        type: string
+        default: ""
+    outputs:
+      tag:
+        description: The tag that was created (equals the version input).
+        value: ${{ jobs.release.outputs.tag }}
+      prerelease:
+        description: Set to "true" when the version has a pre-release suffix.
+        value: ${{ jobs.release.outputs.prerelease }}
+
+jobs:
+  release:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write # push the tag, create the release
+      actions: read # look up check-workflow runs
+    outputs:
+      tag: ${{ steps.vars.outputs.tag }}
+      prerelease: ${{ steps.vars.outputs.prerelease }}
+
+    steps:
+      - name: Validate version format
+        id: vars
+        shell: bash
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          if ! [[ "$VERSION" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z.]+)?$ ]]; then
+            echo "::error::'$VERSION' is not bare semver (X.Y.Z or X.Y.Z-suffix; no v prefix)"
+            exit 1
+          fi
+          echo "tag=$VERSION" >> "$GITHUB_OUTPUT"
+          if [[ "$VERSION" == *-* ]]; then
+            echo "prerelease=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "prerelease=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Checkout main
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: main
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Verify the manifest on main carries this version
+        shell: bash
+        env:
+          VERSION: ${{ inputs.version }}
+          MANIFEST: ${{ inputs.manifest }}
+        run: |
+          set -euo pipefail
+          if [ ! -f "$MANIFEST" ]; then
+            echo "::error::Manifest '$MANIFEST' not found on main"
+            exit 1
+          fi
+          case "$MANIFEST" in
+            *.json)
+              found="$(jq -r '.version // empty' "$MANIFEST")" ;;
+            *.toml)
+              found="$(python3 - "$MANIFEST" <<'PY'
+          import sys, tomllib
+          with open(sys.argv[1], "rb") as f:
+              data = tomllib.load(f)
+          for key in ("project", "package", "tool.poetry"):
+              node = data
+              for part in key.split("."):
+                  node = node.get(part, {}) if isinstance(node, dict) else {}
+              if isinstance(node, dict) and "version" in node:
+                  print(node["version"])
+                  break
+          PY
+          )" ;;
+            *)
+              echo "::error::Unsupported manifest type '$MANIFEST' (expected .json or .toml)"
+              exit 1 ;;
+          esac
+          if [ -z "$found" ]; then
+            echo "::error::No version field found in $MANIFEST"
+            exit 1
+          fi
+          if [ "$found" != "$VERSION" ]; then
+            echo "::error::$MANIFEST on main is $found, not $VERSION. Bump it, merge to main, then re-run."
+            exit 1
+          fi
+          echo "$MANIFEST on main is $found"
+
+      - name: Refuse an existing tag
+        shell: bash
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          for t in "$VERSION" "v$VERSION"; do
+            if git rev-parse -q --verify "refs/tags/$t" >/dev/null; then
+              echo "::error::Tag $t already exists at $(git rev-parse "refs/tags/$t^{commit}")"
+              exit 1
+            fi
+          done
+
+      - name: Require the check workflow to have passed on main HEAD
+        if: inputs.require-workflow != ''
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          WORKFLOW: ${{ inputs.require-workflow }}
+        run: |
+          set -euo pipefail
+          sha="$(git rev-parse HEAD)"
+          n="$(gh run list --repo "$GITHUB_REPOSITORY" --workflow "$WORKFLOW" --commit "$sha" --status success --limit 1 --json databaseId --jq 'length')"
+          if [ "$n" = "0" ]; then
+            echo "::error::No successful '$WORKFLOW' run for main HEAD $sha. Run it (or wait for it) and re-run this workflow."
+            exit 1
+          fi
+          echo "'$WORKFLOW' succeeded on $sha"
+
+      - name: Tag main HEAD
+        shell: bash
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "$VERSION" -m "Release $VERSION"
+          git push origin "refs/tags/$VERSION"
+          echo "Tagged $(git rev-parse HEAD) as $VERSION"
+
+      - name: Create the GitHub release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ inputs.version }}
+          PRERELEASE: ${{ steps.vars.outputs.prerelease }}
+          TITLE_PREFIX: ${{ inputs.title-prefix }}
+        run: |
+          set -euo pipefail
+          prefix="${TITLE_PREFIX:-${GITHUB_REPOSITORY#*/}}"
+          args=(--repo "$GITHUB_REPOSITORY" --verify-tag --generate-notes --title "$prefix $VERSION")
+          if [ "$PRERELEASE" = "true" ]; then
+            args+=(--prerelease)
+          fi
+          gh release create "$VERSION" "${args[@]}"
+          echo "https://github.com/$GITHUB_REPOSITORY/releases/tag/$VERSION"

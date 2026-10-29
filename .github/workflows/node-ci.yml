@@ -1,0 +1,53 @@
+name: Node checks (reusable)
+
+# Lint, typecheck, test and audit a Node project. Each npm script runs only if
+# it exists. Callers run this on push to main (automatic) and on
+# workflow_dispatch (manual, for PR branches). docker-build-push.yml also
+# calls it as its verify job.
+on:
+  workflow_call:
+    inputs:
+      node-version:
+        description: Node major (match the Dockerfile base).
+        type: string
+        default: "22"
+      npm-ci-args:
+        description: Extra flags for npm ci.
+        type: string
+        default: "--ignore-scripts"
+      audit-level:
+        description: npm audit --audit-level for production dependencies.
+        type: string
+        default: high
+
+# Actions are pinned by commit SHA; the comment names the tag each SHA was resolved from.
+jobs:
+  checks:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Set up Node
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci ${{ inputs.npm-ci-args }}
+
+      - name: Lint
+        run: npm run lint --if-present
+
+      - name: Type-check
+        run: npm run typecheck --if-present
+
+      - name: Test
+        run: npm test --if-present
+
+      - name: Audit production dependencies
+        run: npm audit --omit=dev --audit-level=${{ inputs.audit-level }}
