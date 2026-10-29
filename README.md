@@ -131,20 +131,36 @@ homeassistant-mcp, ics-combiner, todoist-mcp, hass-dmp, pydmp.
 
 ## Mobile
 
-The iOS, macOS and Android apps use the same release flow: bump the manifest,
+The iOS and Android apps use the same release flow: bump the manifest,
 merge, then Actions → Release → Run workflow with the version.
 `create-release.yml` tags `main` and creates the GitHub Release, then the
 platform job builds that tag, uploads it to the store and attaches the binary
 to the release.
 
-- **Tags** are bare semver: `1.4.2`, or `1.4.2-beta1` for a pre-release, never
-  `v1.4.2`.
+- **Tags** are bare semver: `1.4.2`, or a pre-release `1.4.2-alpha1`,
+  `1.4.2-beta1`, `1.4.2-rc1` (`-beta.1` style works too), never `v1.4.2`.
 - **Build number** (iOS `CURRENT_PROJECT_VERSION`, Android `versionCode`) is
-  derived from the tag: `MAJOR*10000 + MINOR*100 + PATCH`, so `1.4.2` →
-  `10402`. A pre-release suffix is ignored for the number (`1.4.2-beta1` →
-  `10402`), and MINOR and PATCH must stay at or below 99. No build-number tags
-  are pushed and nothing is committed: the release workflow stamps the numbers
-  on the runner only.
+  derived from the tag only and is strictly monotonic:
+  `MAJOR*1000000 + MINOR*10000 + PATCH*100 + N`, where N orders the builds of
+  one version:
+
+  | Suffix | N |
+  |---|---|
+  | `-alphaK` / `-alpha.K` | K, 1–30 |
+  | `-betaK` / `-beta.K` | 30+K, 31–60 |
+  | `-rcK` / `-rc.K` | 60+K, 61–98 |
+  | none (final release) | 99 |
+
+  So `1.4.2-beta1` → `1040231`, `1.4.2-rc1` → `1040261`, `1.4.2` →
+  `1040299`, and every later version sorts above all of them. Any other
+  suffix, a K out of range, MINOR or PATCH above 99, or MAJOR above 2099
+  (Play's versionCode ceiling) fails the release job. No build-number tags are
+  pushed and nothing is committed: the release workflow stamps the numbers on
+  the runner only.
+- **A rejected suffix fails after tagging.** `create-release.yml` accepts any
+  semver suffix (it also serves the web sites), so check the suffix before
+  starting a mobile release; an unsupported one leaves a tag and a GitHub
+  Release with no build to delete by hand.
 - **Pre-release** versions (hyphen suffix) go to TestFlight / the Play
   `internal` track only. Stable versions go to App Store Connect (TestFlight;
   review submission stays a manual step) and to the Play track the caller
@@ -169,7 +185,7 @@ Jobs (all `macos-26`): `test` (`swift test` in `package-path`, then
 (compile-only `xcodebuild build`, signing off), `app-test` (`xcodebuild test`
 on the newest iPhone simulator, or the Mac) and `archive-validate` (signed
 archive + export, only on `refs/heads/main`). `platform: macOS` switches the
-destinations for a Mac app. Each check job publishes `<job>-result`, so a
+destinations for a Mac app (no caller uses it today). Each check job publishes `<job>-result`, so a
 repo whose ruleset requires a bare check name can keep a thin job of that
 name (see the thin `test` job under the caller templates).
 
@@ -368,5 +384,5 @@ with `android-ci.yml` (job id `check`) and
   key in `UPLOAD_KEYSTORE_*`. An app still in draft needs
   `release-status: draft`.
 
-Used by: we-just-might-ios, law18-ios, oh-toto, ok-rocket (CI only), packrat
-(macOS CI only), we-just-might-android, law18-android.
+Used by: we-just-might-ios, law18-ios, oh-toto, ok-rocket (CI only),
+we-just-might-android, law18-android.

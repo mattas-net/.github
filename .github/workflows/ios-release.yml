@@ -4,8 +4,10 @@ name: iOS Release (reusable)
 # The caller's release.yml chains it after create-release.yml (needs: release) with
 # `version` set to the new tag. This workflow:
 #   1. runs ios-ci.yml on the tag (verify: true), the one place the macOS checks always run;
-#   2. derives the build number from the tag: MAJOR*10000 + MINOR*100 + PATCH
-#      (1.4.2 -> 10402; a pre-release suffix is ignored, so 1.4.2-beta1 -> 10402);
+#   2. derives the build number from the tag: MAJOR*1000000 + MINOR*10000 + PATCH*100 + N,
+#      N = 1-30 for -alphaK, 31-60 for -betaK, 61-98 for -rcK, 99 for the final release
+#      (1.4.2-beta1 -> 1040231, 1.4.2-rc1 -> 1040261, 1.4.2 -> 1040299), strictly increasing within a
+#      version: the final release sorts after its pre-releases; any other suffix fails the run;
 #   3. stamps MARKETING_VERSION (X.Y.Z, suffix removed: App Store versions are numeric) and
 #      CURRENT_PROJECT_VERSION into project.yml on the runner only (never committed), or
 #      passes them as build settings when the project is checked in (xcodegen: false);
@@ -245,11 +247,35 @@ jobs:
             exit 1
           fi
           major="${BASH_REMATCH[1]}"; minor="${BASH_REMATCH[2]}"; patch="${BASH_REMATCH[3]}"
+          suffix="${BASH_REMATCH[4]#-}"
           if [ "$minor" -gt 99 ] || [ "$patch" -gt 99 ]; then
-            echo "::error::MINOR and PATCH must be <= 99 for the MAJOR*10000+MINOR*100+PATCH build number"
+            echo "::error::MINOR and PATCH must be <= 99 for the MAJOR*1000000+MINOR*10000+PATCH*100+N build number"
             exit 1
           fi
-          build=$(( major * 10000 + minor * 100 + patch ))
+          if [ "$major" -gt 2099 ]; then
+            echo "::error::MAJOR must be <= 2099 (Play caps versionCode at 2100000000)"
+            exit 1
+          fi
+          # N orders the builds of one X.Y.Z: alpha 1-30, beta 31-60, rc 61-98, final 99.
+          if [ -z "$suffix" ]; then
+            n=99
+          elif [[ "$suffix" =~ ^(alpha|beta|rc)\.?([1-9][0-9]*)$ ]]; then
+            kind="${BASH_REMATCH[1]}"; k="${BASH_REMATCH[2]}"
+            case "$kind" in
+              alpha) base=0; max=30 ;;
+              beta) base=30; max=30 ;;
+              rc) base=60; max=38 ;;
+            esac
+            if [ "${#k}" -gt 2 ] || [ "$k" -gt "$max" ]; then
+              echo "::error::-$kind$k is out of range: $kind numbers run from 1 to $max"
+              exit 1
+            fi
+            n=$(( base + k ))
+          else
+            echo "::error::pre-release suffix '-$suffix' is not supported: use -alphaK, -betaK or -rcK (or -alpha.K, -beta.K, -rc.K), K from 1"
+            exit 1
+          fi
+          build=$(( major * 1000000 + minor * 10000 + patch * 100 + n ))
           prerelease=false
           [[ "$VERSION" == *-* ]] && prerelease=true
           {
