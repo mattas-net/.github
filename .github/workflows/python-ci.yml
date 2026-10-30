@@ -1,0 +1,167 @@
+name: Python checks (reusable)
+
+# Lint, format-check, type-check, test and build a Python project, then audit its
+# dependencies. Ruff is the standard linter and formatter (Home Assistant core's
+# toolset), so `install` must put ruff on the path. Callers run this on push to
+# main (automatic) and on pull requests behind their `approve` gate.
+#
+# Check contexts seen by a ruleset are `<caller job> / checks (<python>)` and
+# `<caller job> / security`.
+on:
+  workflow_call:
+    inputs:
+      python-versions:
+        description: JSON array of Python versions to test, e.g. '["3.12", "3.13"]'.
+        type: string
+        default: '["3.12"]'
+      install:
+        description: Command that installs the project with its dev tools (ruff, mypy, pytest, build).
+        type: string
+        default: python -m pip install --quiet -e ".[dev]"
+      lint-paths:
+        description: Paths passed to `ruff check` and `ruff format --check`.
+        type: string
+        default: .
+      extra-lint:
+        description: Extra lint commands run after ruff (e.g. `bandit -q -r src`); empty skips.
+        type: string
+        default: ""
+      typecheck:
+        description: Type-check command; empty skips.
+        type: string
+        default: python -m mypy
+      typecheck-blocking:
+        description: Fail the job on type errors (false only while a repo burns down its backlog).
+        type: boolean
+        default: true
+      test:
+        description: Test command.
+        type: string
+        default: python -m pytest -q
+      extra-checks:
+        description: Commands run after the tests (e.g. coverage floors); empty skips.
+        type: string
+        default: ""
+      build:
+        description: Build the sdist and wheel (`python -m build`, so `build` must be installed) and run `twine check` when twine is present.
+        type: boolean
+        default: true
+      actionlint:
+        description: Lint the repo's workflow files with actionlint.
+        type: boolean
+        default: true
+      audit-install:
+        description: Command that installs the dependencies for pip-audit. Install the project itself editable; pip-audit skips editable installs (an unreleased version is not on PyPI and would fail --strict).
+        type: string
+        default: python -m pip install --quiet -e ".[dev]"
+      audit:
+        description: pip-audit mode - strict (fail on findings), warn (report only) or off.
+        type: string
+        default: strict
+      cache-dependency-path:
+        description: Newline-separated globs hashed for the pip cache key (setup-python fails when none match).
+        type: string
+        default: |
+          **/pyproject.toml
+          **/requirements*.txt
+
+# Actions are pinned by commit SHA; the comment names the tag each SHA was resolved from.
+jobs:
+  checks:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ${{ fromJSON(inputs.python-versions) }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Python ${{ matrix.python }}
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+          cache-dependency-path: ${{ inputs.cache-dependency-path }}
+
+      - name: Install
+        run: ${{ inputs.install }}
+
+      - name: Lint (ruff)
+        env:
+          LINT_PATHS: ${{ inputs.lint-paths }}
+        run: |
+          set -euo pipefail
+          # shellcheck disable=SC2086 # LINT_PATHS is a space-separated path list
+          ruff check $LINT_PATHS
+          # shellcheck disable=SC2086
+          ruff format --check $LINT_PATHS
+
+      - name: Extra lint
+        if: inputs.extra-lint != ''
+        run: ${{ inputs.extra-lint }}
+
+      - name: Lint workflows (actionlint)
+        if: inputs.actionlint && strategy.job-index == 0
+        run: docker run --rm -v "${PWD}:/repo" --workdir /repo rhysd/actionlint:1.7.12 -color
+
+      - name: Type-check
+        if: inputs.typecheck != ''
+        continue-on-error: ${{ !inputs.typecheck-blocking }}
+        run: ${{ inputs.typecheck }}
+
+      - name: Test
+        run: ${{ inputs.test }}
+
+      - name: Extra checks
+        if: inputs.extra-checks != ''
+        run: ${{ inputs.extra-checks }}
+
+      - name: Build
+        if: inputs.build
+        run: |
+          set -euo pipefail
+          python -m build
+          if python -m twine --version >/dev/null 2>&1; then
+            python -m twine check --strict dist/*
+          fi
+
+  security:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Dependency review (vulnerable dependencies introduced by the PR)
+        if: github.event_name == 'pull_request'
+        uses: actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294 # v5.0.0
+        with:
+          fail-on-severity: high
+
+      - name: Set up Python
+        if: inputs.audit != 'off'
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: ${{ fromJSON(inputs.python-versions)[0] }}
+          cache: pip
+          cache-dependency-path: ${{ inputs.cache-dependency-path }}
+
+      - name: Install
+        if: inputs.audit != 'off'
+        run: |
+          set -euo pipefail
+          ${{ inputs.audit-install }}
+          python -m pip install --quiet pip-audit==2.10.1
+
+      - name: Audit installed dependencies (pip-audit)
+        if: inputs.audit != 'off'
+        continue-on-error: ${{ inputs.audit == 'warn' }}
+        run: pip-audit --strict --skip-editable

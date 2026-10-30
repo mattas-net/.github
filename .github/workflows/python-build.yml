@@ -1,0 +1,86 @@
+name: Python build (reusable)
+
+# Builds the sdist and wheel for a release tag and uploads them as the `dist`
+# artifact. A release caller runs it after create-release.yml and then publishes
+# the artifact in its own job: PyPI trusted publishing is not supported from
+# inside a reusable workflow, so the `pypa/gh-action-pypi-publish` step must
+# live in the caller's release.yml (the file registered on PyPI).
+#
+# Fails unless the built version equals the tag (PEP 440 comparison, so tag
+# 1.2.0-beta1 matches a 1.2.0b1 wheel).
+on:
+  workflow_call:
+    inputs:
+      ref:
+        description: Tag to build (the version create-release.yml just tagged).
+        type: string
+        required: true
+      python-version:
+        description: Python used to build.
+        type: string
+        default: "3.12"
+      test:
+        description: Test command run on the tag before building (needs `install`); empty skips, since the release gate already requires green checks on that commit.
+        type: string
+        default: ""
+      install:
+        description: Install command used when `test` is set.
+        type: string
+        default: python -m pip install --quiet -e ".[dev]"
+
+# Actions are pinned by commit SHA; the comment names the tag each SHA was resolved from.
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout the tag
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.ref }}
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: ${{ inputs.python-version }}
+
+      - name: Test
+        if: inputs.test != ''
+        run: |
+          set -euo pipefail
+          ${{ inputs.install }}
+          ${{ inputs.test }}
+
+      - name: Build and check
+        run: |
+          set -euo pipefail
+          python -m pip install --quiet build==1.6.1 twine==6.2.0
+          rm -rf dist
+          python -m build
+          python -m twine check --strict dist/*
+
+      - name: Verify the built version matches the tag
+        env:
+          TAG: ${{ inputs.ref }}
+        run: |
+          set -euo pipefail
+          python - "$TAG" dist/*.whl <<'PY'
+          import sys
+          from pathlib import Path
+          from packaging.version import Version
+
+          tag, wheel = sys.argv[1], Path(sys.argv[2]).name
+          built = Version(wheel.split("-")[1])
+          if Version(tag) != built:
+              sys.exit(f"::error::built version {built} != tag {tag}; bump the manifest first")
+          print(f"built {built} for tag {tag}")
+          PY
+
+      - name: Upload dist
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: dist
+          path: dist/
+          if-no-files-found: error

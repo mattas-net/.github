@@ -129,6 +129,172 @@ Used by: mattas-net-next, anthonymattas-com-next, adhdbytes-com-next,
 law18-app-next, we-just-might-next, mattas-net-strapi; calendar-mcp,
 homeassistant-mcp, ics-combiner, todoist-mcp, hass-dmp, pydmp.
 
+## Python (PyPI libraries, MCP servers) and Home Assistant (HACS)
+
+Same release flow. Ruff is the one linter and formatter in every Python repo
+(`ruff check` + `ruff format --check`; Home Assistant core's toolset), plus
+mypy and pytest. Manifest: `pyproject.toml` `[project].version` for libraries
+and MCP servers, `custom_components/<domain>/manifest.json` `version` for HACS
+integrations (HACS installs from GitHub Releases, so the release is the
+publish step).
+
+### python-ci.yml
+
+Jobs: `checks` (matrix over `python-versions`: install, ruff, `extra-lint`,
+actionlint on the first matrix entry, `typecheck`, `test`, `extra-checks`,
+`python -m build` + `twine check` when twine is installed) and `security`
+(dependency review on pull requests, then `pip-audit --strict
+--skip-editable` over `audit-install`, which installs the project editable so
+an unreleased version is not looked up on PyPI). Inputs: `python-versions`
+(`'["3.12"]'`), `install`, `lint-paths` (`.`), `extra-lint`, `typecheck`
+(`python -m mypy`; empty skips), `typecheck-blocking` (true), `test`
+(`python -m pytest -q`), `extra-checks`, `build` (true), `actionlint` (true),
+`audit-install`, `audit` (`strict` | `warn` | `off`), `cache-dependency-path`
+(`**/pyproject.toml` and `**/requirements*.txt`; setup-python fails when no
+file matches).
+
+### codeql.yml
+
+One `analyze` job (input `languages`, default `python`) for repos without
+CodeQL default setup. It is a separate workflow because GitHub checks a nested
+job's permissions before its `if:`, so an opt-in job inside python-ci.yml
+would force every caller to grant `security-events: write`. Caller job:
+
+```yaml
+  codeql:
+    needs: approve
+    if: always() && needs.approve.result != 'failure' && needs.approve.result != 'cancelled'
+    uses: mattas-net/.github/.github/workflows/codeql.yml@main
+    permissions:
+      contents: read
+      security-events: write
+```
+
+### python-build.yml
+
+Checks out the release tag, builds the sdist and wheel, runs
+`twine check --strict`, fails unless the wheel's version equals the tag
+(PEP 440), and uploads the `dist` artifact. Inputs: `ref` (required),
+`python-version`, `test` / `install` (optional re-test on the tag).
+
+PyPI trusted publishing does not work from inside a reusable workflow, so
+the publish job stays in the caller's `release.yml`; register the PyPI
+trusted publisher (or pending publisher, for a new project) for workflow
+`release.yml`, environment `pypi`.
+
+### hacs-ci.yml
+
+Jobs `hassfest` and `hacs` (`hacs/action`, category `integration`). Input:
+`hacs-ignore` (`brands`). The HACS check also needs the repository to be
+public with a description, topics and issues enabled.
+
+### Python caller templates
+
+`.github/workflows/checks.yml` (library or MCP server)
+
+```yaml
+name: Checks
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+concurrency:
+  group: checks-${{ github.ref }}
+  cancel-in-progress: true
+permissions:
+  contents: read
+jobs:
+  approve:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
+    environment: approval
+    steps:
+      - run: echo "Checks approved by ${GITHUB_TRIGGERING_ACTOR}"
+  python:
+    needs: approve
+    if: always() && needs.approve.result != 'failure' && needs.approve.result != 'cancelled'
+    uses: mattas-net/.github/.github/workflows/python-ci.yml@main
+    permissions:
+      contents: read
+    with:
+      python-versions: '["3.12", "3.13"]'
+```
+
+A HACS integration adds a nightly `schedule` trigger and a second job:
+
+```yaml
+  hacs:
+    needs: approve
+    if: always() && needs.approve.result != 'failure' && needs.approve.result != 'cancelled'
+    uses: mattas-net/.github/.github/workflows/hacs-ci.yml@main
+    permissions:
+      contents: read
+```
+
+with `python` installing `-r requirements.test.txt`, `build: false` and
+`audit: off` (the pinned Home Assistant test environment is not actionable;
+dependency review still runs on PRs).
+
+`.github/workflows/release.yml` (PyPI library)
+
+```yaml
+name: Release
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Version to release (bare semver, e.g. 1.4.2)
+        required: true
+        type: string
+permissions:
+  contents: read
+jobs:
+  release:
+    uses: mattas-net/.github/.github/workflows/create-release.yml@main
+    permissions:
+      contents: write
+      actions: read
+    with:
+      version: ${{ inputs.version }}
+      manifest: pyproject.toml
+      require-workflow: Checks
+  build:
+    needs: release
+    uses: mattas-net/.github/.github/workflows/python-build.yml@main
+    permissions:
+      contents: read
+    with:
+      ref: ${{ inputs.version }}
+  publish:
+    needs: build
+    runs-on: ubuntu-24.04
+    environment: pypi # must match the PyPI trusted publisher
+    permissions:
+      contents: write # attach the files to the release
+      id-token: write # trusted publishing
+      attestations: write
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: dist
+          path: dist/
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: dist/*
+      - uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086 # v1.14.3
+      - env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.version }}
+        run: gh release upload "$TAG" dist/* --repo "$GITHUB_REPOSITORY"
+```
+
+A HACS integration's `release.yml` is the `release` job alone with
+`manifest: custom_components/<domain>/manifest.json`.
+
+Used by: pydmp, aioddp, pyminleon, hass-dmp, hass-ddp, calendar-mcp,
+homeassistant-mcp, ics-combiner.
+
 ## Mobile
 
 The iOS and Android apps use the same release flow: bump the manifest,
