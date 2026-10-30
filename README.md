@@ -143,9 +143,9 @@ publish step).
 Jobs: `checks` (matrix over `python-versions`: install, ruff, `extra-lint`,
 actionlint on the first matrix entry, `typecheck`, `test`, `extra-checks`,
 `python -m build` + `twine check` when twine is installed) and `security`
-(dependency review on pull requests, then `pip-audit --strict
---skip-editable` over `audit-install`, which installs the project editable so
-an unreleased version is not looked up on PyPI). Inputs: `python-versions`
+(dependency review on pull requests, then `pip-audit --strict` over `pip freeze --exclude-editable` after
+`audit-install`, which installs the project editable so an unreleased version
+is never looked up on PyPI). Inputs: `python-versions`
 (`'["3.12"]'`), `install`, `lint-paths` (`.`), `extra-lint`, `typecheck`
 (`python -m mypy`; empty skips), `typecheck-blocking` (true), `test`
 (`python -m pytest -q`), `extra-checks`, `build` (true), `actionlint` (true),
