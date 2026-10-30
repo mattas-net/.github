@@ -141,6 +141,7 @@ jobs:
         with:
           ref: ${{ steps.vars.outputs.ref }}
           path: ${{ inputs.path }}
+          persist-credentials: false
 
       - name: Resolve extra repository ref
         id: extra
