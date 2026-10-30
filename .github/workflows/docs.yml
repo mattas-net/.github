@@ -1,0 +1,70 @@
+name: Docs (reusable)
+
+# Build every documented version with Zensical and publish the versioned site (mike) to the
+# caller's gh-pages branch via the caller's scripts/publish_versioned_docs.py:
+#   dev = main, X.Y = newest patch tag of each documented minor line,
+#   latest = highest stable release (the site default; dev until a release exists).
+# Public repos serve gh-pages with Pages; private repos build gh-pages and keep Pages disabled.
+# Always builds from main with full history (each release tag is rebuilt from its own sources),
+# so `version` is informational only. Callers run this on push to main, manual dispatch, and
+# from release.yml after tagging; the caller job needs `permissions: contents: write`.
+on:
+  workflow_call:
+    inputs:
+      version:
+        description: Release version that triggered the publish (informational; release.yml passes it).
+        type: string
+        default: ""
+      python-version:
+        description: Python version for the docs toolchain.
+        type: string
+        default: "3.13"
+      install:
+        description: Command that installs the documentation tools.
+        type: string
+        default: python -m pip install --disable-pip-version-check -r requirements-docs.txt
+
+permissions:
+  contents: read
+
+# Actions are pinned by commit SHA; the comment names the tag each SHA was resolved from.
+jobs:
+  publish:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    concurrency:
+      group: docs-gh-pages # one publisher per repo; never cancel a publish mid-flight
+      cancel-in-progress: false
+    permissions:
+      contents: write # the publish script pushes the gh-pages branch
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0 # every release tag is rebuilt from its own sources
+          ref: main
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: ${{ inputs.python-version }}
+
+      - name: Install documentation tools
+        run: ${{ inputs.install }}
+
+      - name: Configure Git author
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Configure publish credentials
+        env:
+          GH_PAGES_TOKEN: ${{ github.token }}
+        run: git remote set-url origin "https://x-access-token:${GH_PAGES_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+
+      - name: Publish
+        env:
+          RELEASE_VERSION: ${{ inputs.version }}
+        run: |
+          if [[ -n "$RELEASE_VERSION" ]]; then echo "Called for release $RELEASE_VERSION"; fi
+          python scripts/publish_versioned_docs.py --push

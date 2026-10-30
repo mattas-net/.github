@@ -46,6 +46,60 @@ means the run was dispatched from a tag), `build-args`, `platforms`
 (`linux/amd64`; QEMU is set up for others), `verify` (run node-ci first),
 `node-version`, `npm-ci-args`.
 
+### docs.yml
+
+Builds every documented version with Zensical and publishes the versioned
+site (mike) to the caller's `gh-pages` branch by running the caller's
+`scripts/publish_versioned_docs.py --push`: `dev` = `main`, `X.Y` = newest
+patch tag of each documented minor line, `latest` = highest stable release.
+Job `publish` checks out `main` with full history (every release tag is
+rebuilt from its own sources), installs the tools, sets the
+`github-actions[bot]` author and a token remote, and publishes under
+job-level concurrency `docs-gh-pages` (never cancelled). Public repos serve
+`gh-pages` with Pages; private repos build it and keep Pages disabled.
+Inputs: `version` (informational; release.yml passes it), `python-version`
+(`3.13`), `install`
+(`python -m pip install --disable-pip-version-check -r requirements-docs.txt`).
+The caller job needs `permissions: contents: write`.
+
+`.github/workflows/docs.yml` (every documented repo; only `with:` overrides
+may differ)
+
+```yaml
+name: Docs
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+  workflow_call:
+    inputs:
+      version:
+        description: Release version that triggered the publish (informational)
+        type: string
+        default: ""
+permissions:
+  contents: read
+jobs:
+  docs:
+    uses: mattas-net/.github/.github/workflows/docs.yml@main
+    permissions:
+      contents: write # the publish script pushes the gh-pages branch
+    with:
+      version: ${{ inputs.version }}
+```
+
+`release.yml` ends with a job that republishes after tagging:
+
+```yaml
+  docs:
+    needs: release
+    uses: ./.github/workflows/docs.yml
+    permissions:
+      contents: write
+    with:
+      version: ${{ inputs.version }}
+```
+
 ## Caller templates
 
 `.github/workflows/checks.yml` — automatic on push to main; on pull requests
@@ -545,3 +599,11 @@ with `android-ci.yml` (job id `check`) and
 
 Used by: we-just-might-ios, law18-ios, oh-toto, ok-rocket (CI only),
 we-just-might-android, law18-android.
+
+## This repository's checks
+
+`.github/workflows/checks.yml` lints every workflow in this repository with
+actionlint (release binary pinned by version and verified against its
+sha256). Same triggers and `approve` gate as the caller templates: automatic
+on push to `main`; on pull requests it waits in the `approval` environment.
+Required check (default-branch ruleset): `actionlint`.
