@@ -28,7 +28,7 @@ Version lookup by manifest type:
 | Manifest | Read from |
 |---|---|
 | `.json` | `.version` |
-| `.toml` | `[project]`, `[package]` or `[tool.poetry]` `version` |
+| `.toml` | the first of `[project]`, `[package]`, `[tool.poetry]`, `[workspace.package]` that has a `version` (a Cargo workspace root holds only `[workspace.package]`) |
 | `.yml` / `.yaml` | every `<manifest-key>:` line (default `MARKETING_VERSION`) at any indentation, so top level or nested under `settings`/`targets`; all must agree. A pre-release `1.4.2-beta1` matches `1.4.2`, because App Store versions are numeric. |
 | `.properties` | the `<manifest-key>=` line (default `version`), e.g. `wjm.versionName`. Like the iOS manifest it holds `X.Y.Z`: a pre-release `1.4.2-beta1` matches `1.4.2`. |
 
@@ -45,6 +45,43 @@ Builds the Dockerfile and pushes `ghcr.io/mattas-net/<repo>:<tag>` plus
 means the run was dispatched from a tag), `build-args`, `platforms`
 (`linux/amd64`; QEMU is set up for others), `verify` (run node-ci first),
 `node-version`, `npm-ci-args`.
+
+Optional inputs for non-Node and multi-repo images (defaults keep the
+behavior above):
+
+- `image-tag` (empty): push exactly this tag (e.g. `dev`) from any ref —
+  `ref`, or the ref the run was dispatched from — with no `latest`.
+- `context` (`.`) and `file` (`./Dockerfile`), both relative to the
+  workspace root.
+- `path` (empty = workspace root): where the caller repo is checked out.
+- `extra-repository` (empty skips), `extra-path`, `extra-ref-file`: check out
+  a second repository at `extra-path`, at the ref/SHA on the first line of
+  `extra-ref-file` (a path from the workspace root; empty = default branch).
+- Secret `extra-ssh-key` (optional): deploy key for a private
+  `extra-repository`.
+
+we-just-might-server (Rust) builds against `we-just-might-core`:
+
+```yaml
+  image:
+    needs: release
+    uses: mattas-net/.github/.github/workflows/docker-build-push.yml@main
+    permissions:
+      contents: read
+      packages: write
+    secrets:
+      extra-ssh-key: ${{ secrets.WJM_CORE_DEPLOY_KEY }}
+    with:
+      ref: ${{ inputs.version }}
+      verify: false
+      path: we-just-might-server
+      file: we-just-might-server/Dockerfile
+      extra-repository: mattas-net/we-just-might-core
+      extra-path: we-just-might-core
+      extra-ref-file: we-just-might-server/scripts/core-ref
+```
+
+Its `release.yml` uses `manifest: Cargo.toml` (the workspace root).
 
 ### docs.yml
 

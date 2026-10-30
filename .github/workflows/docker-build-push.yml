@@ -5,9 +5,15 @@ name: Build and Push Docker Image (reusable)
 #   - a release caller passes `ref` (the tag create-release.yml just made):
 #     the tag is checked out and the image is tagged with it;
 #   - a manual dispatch from an existing tag (rebuild): no `ref` needed.
-# A dispatch from a branch does nothing. `latest` is added unless the tag has a
-# pre-release suffix (1.4.2-beta1). The OCI source label links the package to
-# the repository.
+#   - `image-tag` set (e.g. `dev`): that exact tag is pushed from any ref
+#     (`ref`, or the ref this run was dispatched from); no `latest`.
+# Otherwise a dispatch from a branch does nothing. `latest` is added unless the
+# tag has a pre-release suffix (1.4.2-beta1). The OCI source label links the
+# package to the repository.
+# Multi-repo builds: `path` places the caller repo under the workspace and
+# `extra-repository` checks out a second (private) repo at `extra-path`, at the
+# ref named on the first line of `extra-ref-file`, with the `extra-ssh-key`
+# deploy key; `context` and `file` are relative to the workspace root.
 on:
   workflow_call:
     inputs:
@@ -35,6 +41,38 @@ on:
         description: Passed to node-ci.yml when verify is true.
         type: string
         default: "--ignore-scripts"
+      image-tag:
+        description: Push exactly this image tag (e.g. dev) from any ref, without `latest`. Empty = tag-derived (ref must be a tag).
+        type: string
+        default: ""
+      context:
+        description: Docker build context, relative to the workspace root.
+        type: string
+        default: .
+      file:
+        description: Dockerfile path, relative to the workspace root.
+        type: string
+        default: ./Dockerfile
+      path:
+        description: Where the caller repo is checked out, relative to the workspace root (empty = the root).
+        type: string
+        default: ""
+      extra-repository:
+        description: Second repository to check out (owner/name, e.g. mattas-net/we-just-might-core); empty skips.
+        type: string
+        default: ""
+      extra-path:
+        description: Where extra-repository is checked out, relative to the workspace root.
+        type: string
+        default: ""
+      extra-ref-file:
+        description: File (relative to the workspace root, e.g. we-just-might-server/scripts/core-ref) whose first line is the ref/SHA of extra-repository to check out; empty = its default branch.
+        type: string
+        default: ""
+    secrets:
+      extra-ssh-key:
+        description: Deploy key with read access to extra-repository (needed when it is private).
+        required: false
 
 env:
   REGISTRY: ghcr.io
@@ -43,7 +81,7 @@ env:
 # Actions are pinned by commit SHA; the comment names the tag each SHA was resolved from.
 jobs:
   verify:
-    if: inputs.verify && (inputs.ref != '' || github.ref_type == 'tag')
+    if: inputs.verify && (inputs.ref != '' || github.ref_type == 'tag' || inputs.image-tag != '')
     uses: mattas-net/.github/.github/workflows/node-ci.yml@main
     permissions:
       contents: read
@@ -55,7 +93,7 @@ jobs:
     needs: verify
     # always() lets the job run when verify was skipped (inputs.verify=false);
     # a failed verify still blocks the build.
-    if: always() && needs.verify.result != 'failure' && needs.verify.result != 'cancelled' && (inputs.ref != '' || github.ref_type == 'tag')
+    if: always() && needs.verify.result != 'failure' && needs.verify.result != 'cancelled' && (inputs.ref != '' || github.ref_type == 'tag' || inputs.image-tag != '')
     runs-on: ubuntu-24.04
     permissions:
       contents: read
@@ -69,8 +107,23 @@ jobs:
           IMAGE: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           REF_INPUT: ${{ inputs.ref }}
           REF_NAME: ${{ github.ref_name }}
+          IMAGE_TAG: ${{ inputs.image-tag }}
         run: |
           set -euo pipefail
+          if [[ -n "$IMAGE_TAG" ]]; then
+            if [[ ! "$IMAGE_TAG" =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$ ]]; then
+              echo "::error::Invalid image-tag '$IMAGE_TAG'"
+              exit 1
+            fi
+            # Empty ref = check out the ref this run was dispatched from.
+            echo "ref=$REF_INPUT" >> "$GITHUB_OUTPUT"
+            {
+              echo "tags<<EOF"
+              echo "${IMAGE}:${IMAGE_TAG}"
+              echo "EOF"
+            } >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
           tag="${REF_INPUT:-$REF_NAME}"
           echo "ref=$tag" >> "$GITHUB_OUTPUT"
           tags="${IMAGE}:${tag}"
@@ -87,6 +140,39 @@ jobs:
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           ref: ${{ steps.vars.outputs.ref }}
+          path: ${{ inputs.path }}
+
+      - name: Resolve extra repository ref
+        id: extra
+        if: inputs.extra-repository != ''
+        shell: bash
+        env:
+          REF_FILE: ${{ inputs.extra-ref-file }}
+        run: |
+          set -euo pipefail
+          ref=""
+          if [[ -n "$REF_FILE" ]]; then
+            if [[ ! -f "$REF_FILE" ]]; then
+              echo "::error::extra-ref-file '$REF_FILE' not found"
+              exit 1
+            fi
+            ref="$(head -n 1 "$REF_FILE" | tr -d '[:space:]')"
+            if [[ ! "$ref" =~ ^[A-Za-z0-9._/-]+$ ]]; then
+              echo "::error::'$REF_FILE' does not start with a valid ref"
+              exit 1
+            fi
+          fi
+          echo "ref=$ref" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout extra repository
+        if: inputs.extra-repository != ''
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          repository: ${{ inputs.extra-repository }}
+          ref: ${{ steps.extra.outputs.ref }}
+          path: ${{ inputs.extra-path }}
+          ssh-key: ${{ secrets.extra-ssh-key }}
+          persist-credentials: false
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3.7.0
@@ -113,7 +199,8 @@ jobs:
         id: build
         uses: docker/build-push-action@ca052bb54ab0790a636c9b5f226502c73d547a25 # v5.4.0
         with:
-          context: .
+          context: ${{ inputs.context }}
+          file: ${{ inputs.file }}
           platforms: ${{ inputs.platforms }}
           push: true
           tags: ${{ steps.vars.outputs.tags }}
