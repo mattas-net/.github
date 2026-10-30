@@ -16,7 +16,7 @@ on:
         type: string
         default: "--ignore-scripts"
       audit-level:
-        description: npm audit --audit-level for production dependencies.
+        description: Minimum severity that fails npm audit and, on PRs, dependency review (production dependencies only).
         type: string
         default: high
 
@@ -49,5 +49,15 @@ jobs:
       - name: Test
         run: npm test --if-present
 
+      # Same model as python-ci.yml: every run audits the whole tree, so a high CVE
+      # on main fails Checks and blocks create-release.yml; a PR also gets dependency
+      # review of what it introduces.
       - name: Audit production dependencies
         run: npm audit --omit=dev --audit-level=${{ inputs.audit-level }}
+
+      - name: Dependency review (vulnerable dependencies introduced by the PR)
+        if: github.event_name == 'pull_request'
+        uses: actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294 # v5.0.0
+        with:
+          fail-on-severity: ${{ inputs.audit-level }}
+          fail-on-scopes: runtime
