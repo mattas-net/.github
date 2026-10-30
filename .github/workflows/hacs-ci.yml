@@ -1,0 +1,41 @@
+name: HACS validation (reusable)
+
+# Validates a Home Assistant custom integration the way HACS and Home Assistant
+# do: hassfest (manifest, translations, services) and the HACS repository
+# action. Tests and lint run separately through python-ci.yml. Callers run this
+# on push to main, on pull requests behind their `approve` gate, and nightly
+# (hassfest tracks the current Home Assistant dev branch).
+#
+# Check contexts: `<caller job> / hassfest` and `<caller job> / hacs`.
+on:
+  workflow_call:
+    inputs:
+      hacs-ignore:
+        description: Space-separated HACS checks to skip (e.g. `brands` until the integration is in home-assistant/brands).
+        type: string
+        default: brands
+
+# Actions are pinned by commit SHA; the comment names the tag each SHA was resolved from.
+jobs:
+  hassfest:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: hassfest
+        uses: home-assistant/actions/hassfest@86d4564712fa02543c808e3a693dd04f9d3f8361 # master 2026-10-30 (no release tags)
+
+  hacs:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - name: HACS validation
+        uses: hacs/action@d556e736723344f83838d08488c983a15381059a # 22.5.0
+        with:
+          category: integration
+          ignore: ${{ inputs.hacs-ignore }}
