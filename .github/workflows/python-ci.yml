@@ -164,4 +164,9 @@ jobs:
       - name: Audit installed dependencies (pip-audit)
         if: inputs.audit != 'off'
         continue-on-error: ${{ inputs.audit == 'warn' }}
-        run: pip-audit --strict --skip-editable
+        # Audit a frozen list that leaves out the editable project: --strict fails on
+        # anything it cannot look up, and an unreleased version is not on PyPI.
+        run: |
+          set -euo pipefail
+          python -m pip freeze --exclude-editable > "$RUNNER_TEMP/audit-requirements.txt"
+          pip-audit --strict --disable-pip --no-deps -r "$RUNNER_TEMP/audit-requirements.txt"
