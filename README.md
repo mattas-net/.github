@@ -153,22 +153,11 @@ is never looked up on PyPI). Inputs: `python-versions`
 (`**/pyproject.toml` and `**/requirements*.txt`; setup-python fails when no
 file matches).
 
-### codeql.yml
+### CodeQL
 
-One `analyze` job (input `languages`, default `python`) for repos without
-CodeQL default setup. It is a separate workflow because GitHub checks a nested
-job's permissions before its `if:`, so an opt-in job inside python-ci.yml
-would force every caller to grant `security-events: write`. Caller job:
-
-```yaml
-  codeql:
-    needs: approve
-    if: always() && needs.approve.result != 'failure' && needs.approve.result != 'cancelled'
-    uses: mattas-net/.github/.github/workflows/codeql.yml@main
-    permissions:
-      contents: read
-      security-events: write
-```
+There is no shared CodeQL workflow: every repo uses CodeQL default setup
+(repository settings), with languages limited to real source code. Callers do
+not add a `codeql` job.
 
 ### python-build.yml
 
