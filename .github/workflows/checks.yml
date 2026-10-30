@@ -29,7 +29,8 @@ jobs:
 
   actionlint:
     needs: approve
-    if: always() && needs.approve.result != 'failure' && needs.approve.result != 'cancelled'
+    # always(): a rejected or cancelled approval must fail this required check, not skip it (a skipped required check counts as passing).
+    if: always()
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     env:
@@ -37,6 +38,11 @@ jobs:
       # sha256 of actionlint_1.7.12_linux_amd64.tar.gz from the release's checksums.txt
       ACTIONLINT_SHA256: 8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8
     steps:
+      - name: Require approval
+        if: needs.approve.result == 'failure' || needs.approve.result == 'cancelled'
+        run: |
+          echo "::error::Checks were not approved"
+          exit 1
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
