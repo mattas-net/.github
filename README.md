@@ -245,7 +245,12 @@ repositories (Settings → Actions → General → Access).
 Pass them with `secrets: inherit`. Repository secrets work everywhere; a
 secret stored only in the `Deploy` environment is visible to the upload job
 but not to the CI run before it, so keep `WJM_CORE_DEPLOY_KEY` at repository
-level.
+level. The release workflows forward only `WJM_CORE_DEPLOY_KEY` to their
+nested CI run; the signing and store secrets reach the upload job alone.
+Every checkout in the mobile workflows sets `persist-credentials: false`
+(nothing uses git with the token afterwards; `gh` reads `GH_TOKEN`), and
+`xcode-version`/`xcode-version-file` fail the job unless the selected Xcode
+reports that major.minor.
 
 | Secret | Used by |
 |---|---|

@@ -52,7 +52,7 @@ on:
         type: string
         default: 4d9e34b62172d645eed6457cac13fc222569974098ef4ee9c3368bedf0196806
       xcode-version:
-        description: Xcode to select, e.g. 26.3 (/Applications/Xcode_26.3.app). Empty = runner default.
+        description: Xcode to select, e.g. 26.3 (/Applications/Xcode_26.3.app, else the newest Xcode_26.3.x.app); the job fails unless xcodebuild then reports that version. Empty = runner default.
         type: string
         default: ""
       xcode-version-file:
@@ -196,6 +196,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ inputs.ref }}
+          persist-credentials: false
 
       - name: Export test environment
         if: inputs.test-env != ''
@@ -225,13 +226,24 @@ jobs:
             version="$(tr -d '[:space:]' < "$XCODE_VERSION_FILE")"
           fi
           if [ -n "$version" ]; then
+            # Exact match first (26.3 -> Xcode_26.3.app), else the newest patch of that
+            # major.minor (26.3 -> Xcode_26.3.1.app), so a pin names the toolchain CI tests with.
             app="/Applications/Xcode_${version}.app"
             if [ ! -d "$app" ]; then
-              echo "::error::$app is not on this runner. Available:"
+              app="$(find /Applications -maxdepth 1 -type d -name "Xcode_${version}.*.app" | sort -V | tail -n 1)"
+            fi
+            if [ -z "$app" ] || [ ! -d "$app" ]; then
+              echo "::error::Xcode $version is not on this runner. Available:"
               ls -d /Applications/Xcode*.app
               exit 1
             fi
             sudo xcode-select -s "$app"
+            # Fail unless the selected toolchain reports the pinned version (any patch).
+            reported="$(xcodebuild -version | head -n 1)"
+            if ! [[ "$reported" == "Xcode $version" || "$reported" == "Xcode $version."* ]]; then
+              echo "::error::Selected $app reports '$reported', not Xcode $version"
+              exit 1
+            fi
           fi
           xcodebuild -version
 
@@ -309,6 +321,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ inputs.ref }}
+          persist-credentials: false
 
       # The release asset is immutable, but the URL is not a trust boundary on its own:
       # verify the pinned SHA-256 before executing it.
@@ -353,6 +366,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ inputs.ref }}
+          persist-credentials: false
 
       - name: Export test environment
         if: inputs.test-env != ''
@@ -382,13 +396,24 @@ jobs:
             version="$(tr -d '[:space:]' < "$XCODE_VERSION_FILE")"
           fi
           if [ -n "$version" ]; then
+            # Exact match first (26.3 -> Xcode_26.3.app), else the newest patch of that
+            # major.minor (26.3 -> Xcode_26.3.1.app), so a pin names the toolchain CI tests with.
             app="/Applications/Xcode_${version}.app"
             if [ ! -d "$app" ]; then
-              echo "::error::$app is not on this runner. Available:"
+              app="$(find /Applications -maxdepth 1 -type d -name "Xcode_${version}.*.app" | sort -V | tail -n 1)"
+            fi
+            if [ -z "$app" ] || [ ! -d "$app" ]; then
+              echo "::error::Xcode $version is not on this runner. Available:"
               ls -d /Applications/Xcode*.app
               exit 1
             fi
             sudo xcode-select -s "$app"
+            # Fail unless the selected toolchain reports the pinned version (any patch).
+            reported="$(xcodebuild -version | head -n 1)"
+            if ! [[ "$reported" == "Xcode $version" || "$reported" == "Xcode $version."* ]]; then
+              echo "::error::Selected $app reports '$reported', not Xcode $version"
+              exit 1
+            fi
           fi
           xcodebuild -version
 
@@ -513,6 +538,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ inputs.ref }}
+          persist-credentials: false
 
       - name: Export test environment
         if: inputs.test-env != ''
@@ -542,13 +568,24 @@ jobs:
             version="$(tr -d '[:space:]' < "$XCODE_VERSION_FILE")"
           fi
           if [ -n "$version" ]; then
+            # Exact match first (26.3 -> Xcode_26.3.app), else the newest patch of that
+            # major.minor (26.3 -> Xcode_26.3.1.app), so a pin names the toolchain CI tests with.
             app="/Applications/Xcode_${version}.app"
             if [ ! -d "$app" ]; then
-              echo "::error::$app is not on this runner. Available:"
+              app="$(find /Applications -maxdepth 1 -type d -name "Xcode_${version}.*.app" | sort -V | tail -n 1)"
+            fi
+            if [ -z "$app" ] || [ ! -d "$app" ]; then
+              echo "::error::Xcode $version is not on this runner. Available:"
               ls -d /Applications/Xcode*.app
               exit 1
             fi
             sudo xcode-select -s "$app"
+            # Fail unless the selected toolchain reports the pinned version (any patch).
+            reported="$(xcodebuild -version | head -n 1)"
+            if ! [[ "$reported" == "Xcode $version" || "$reported" == "Xcode $version."* ]]; then
+              echo "::error::Selected $app reports '$reported', not Xcode $version"
+              exit 1
+            fi
           fi
           xcodebuild -version
 
@@ -678,6 +715,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ inputs.ref }}
+          persist-credentials: false
 
       - name: Select Xcode
         shell: bash
@@ -691,13 +729,24 @@ jobs:
             version="$(tr -d '[:space:]' < "$XCODE_VERSION_FILE")"
           fi
           if [ -n "$version" ]; then
+            # Exact match first (26.3 -> Xcode_26.3.app), else the newest patch of that
+            # major.minor (26.3 -> Xcode_26.3.1.app), so a pin names the toolchain CI tests with.
             app="/Applications/Xcode_${version}.app"
             if [ ! -d "$app" ]; then
-              echo "::error::$app is not on this runner. Available:"
+              app="$(find /Applications -maxdepth 1 -type d -name "Xcode_${version}.*.app" | sort -V | tail -n 1)"
+            fi
+            if [ -z "$app" ] || [ ! -d "$app" ]; then
+              echo "::error::Xcode $version is not on this runner. Available:"
               ls -d /Applications/Xcode*.app
               exit 1
             fi
             sudo xcode-select -s "$app"
+            # Fail unless the selected toolchain reports the pinned version (any patch).
+            reported="$(xcodebuild -version | head -n 1)"
+            if ! [[ "$reported" == "Xcode $version" || "$reported" == "Xcode $version."* ]]; then
+              echo "::error::Selected $app reports '$reported', not Xcode $version"
+              exit 1
+            fi
           fi
           xcodebuild -version
 
