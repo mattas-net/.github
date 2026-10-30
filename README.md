@@ -143,13 +143,32 @@ publish step).
 Jobs: `checks` (matrix over `python-versions`: install, ruff, `extra-lint`,
 actionlint on the first matrix entry, `typecheck`, `test`, `extra-checks`,
 `python -m build` + `twine check` when twine is installed) and `security`
-(dependency review on pull requests, then `pip-audit --strict` over
-`audit-install`); `codeql` only when `codeql: true` (leave false with CodeQL
-default setup). Inputs: `python-versions` (`'["3.12"]'`), `install`,
-`lint-paths` (`.`), `extra-lint`, `typecheck` (`python -m mypy`; empty
-skips), `typecheck-blocking` (true), `test` (`python -m pytest -q`),
-`extra-checks`, `build` (true), `actionlint` (true), `audit-install`,
-`audit` (`strict` | `warn` | `off`), `codeql` (false).
+(dependency review on pull requests, then `pip-audit --strict
+--skip-editable` over `audit-install`, which installs the project editable so
+an unreleased version is not looked up on PyPI). Inputs: `python-versions`
+(`'["3.12"]'`), `install`, `lint-paths` (`.`), `extra-lint`, `typecheck`
+(`python -m mypy`; empty skips), `typecheck-blocking` (true), `test`
+(`python -m pytest -q`), `extra-checks`, `build` (true), `actionlint` (true),
+`audit-install`, `audit` (`strict` | `warn` | `off`), `cache-dependency-path`
+(`**/pyproject.toml` and `**/requirements*.txt`; setup-python fails when no
+file matches).
+
+### codeql.yml
+
+One `analyze` job (input `languages`, default `python`) for repos without
+CodeQL default setup. It is a separate workflow because GitHub checks a nested
+job's permissions before its `if:`, so an opt-in job inside python-ci.yml
+would force every caller to grant `security-events: write`. Caller job:
+
+```yaml
+  codeql:
+    needs: approve
+    if: always() && needs.approve.result != 'failure' && needs.approve.result != 'cancelled'
+    uses: mattas-net/.github/.github/workflows/codeql.yml@main
+    permissions:
+      contents: read
+      security-events: write
+```
 
 ### python-build.yml
 
