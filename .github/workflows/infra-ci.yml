@@ -251,7 +251,7 @@ jobs:
           status=0
           for dir in "${dirs[@]}"; do
             echo "::group::$dir"
-            trivy config --exit-code 1 --severity HIGH,CRITICAL --no-progress "$dir" || status=1
+            trivy config --exit-code 1 --severity HIGH,CRITICAL "$dir" || status=1
             echo "::endgroup::"
           done
           exit "$status"
