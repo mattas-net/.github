@@ -1,0 +1,30 @@
+# Minimal python-lib fixture for the self-test job in .github/workflows/checks.yml.
+# It exercises python-ci.yml end to end: ruff, mypy, pytest, build, pip-audit.
+[build-system]
+requires = ["setuptools>=80"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "fixture-pkg"
+version = "0.0.0"
+description = "Self-test fixture for mattas-net/.github python-ci.yml"
+requires-python = ">=3.12"
+license = "MIT"
+
+[project.optional-dependencies]
+dev = [
+  "build==1.6.1",
+  "mypy==2.4.0",
+  "pytest==9.1.1",
+  "ruff==0.17.2",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.mypy]
+files = ["src", "tests"]
+strict = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

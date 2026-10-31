@@ -1,0 +1,2 @@
+# Docs toolchain for the self-test fixture (exact pin).
+zensical==0.0.71

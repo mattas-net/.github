@@ -8,6 +8,9 @@ name: Docs (reusable)
 # Always builds from main with full history (each release tag is rebuilt from its own sources),
 # so `version` is informational only. Callers run this on push to main, manual dispatch, and
 # from release.yml after tagging; the caller job needs `permissions: contents: write`.
+# dry-run: true instead builds the triggering ref's docs with `zensical build --clean --strict`
+# and publishes nothing (this repo's self-test uses it); the caller job still grants
+# contents: write, because a called job cannot be given more than its caller allows.
 on:
   workflow_call:
     inputs:
@@ -23,6 +26,14 @@ on:
         description: Command that installs the documentation tools.
         type: string
         default: python -m pip install --disable-pip-version-check -r requirements-docs.txt
+      working-directory:
+        description: Directory holding zensical.toml and the docs requirements, relative to the repo root; every command runs there.
+        type: string
+        default: .
+      dry-run:
+        description: Build the triggering ref's docs with zensical and publish nothing (no gh-pages, no push).
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -33,15 +44,21 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     concurrency:
-      group: docs-gh-pages # one publisher per repo; never cancel a publish mid-flight
+      # One publisher per repo; never cancel a publish mid-flight. Dry runs publish nothing.
+      group: ${{ inputs.dry-run && format('docs-dry-run-{0}', github.run_id) || 'docs-gh-pages' }}
       cancel-in-progress: false
     permissions:
       contents: write # the publish script pushes the gh-pages branch
+    defaults:
+      run:
+        working-directory: ${{ inputs.working-directory }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          fetch-depth: 0 # every release tag is rebuilt from its own sources
-          ref: main
+          # Publish: main with every release tag (each is rebuilt from its own sources).
+          # Dry run: the triggering ref only.
+          fetch-depth: ${{ inputs.dry-run && 1 || 0 }}
+          ref: ${{ !inputs.dry-run && 'main' || '' }}
           persist-credentials: false
 
       - name: Set up Python
@@ -52,17 +69,27 @@ jobs:
       - name: Install documentation tools
         run: ${{ inputs.install }}
 
+      - name: Build (dry run)
+        if: inputs.dry-run
+        run: |
+          set -euo pipefail
+          zensical build --clean --strict
+          test -f site/index.html
+
       - name: Configure Git author
+        if: ${{ !inputs.dry-run }}
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
       - name: Configure publish credentials
+        if: ${{ !inputs.dry-run }}
         env:
           GH_PAGES_TOKEN: ${{ github.token }}
         run: git remote set-url origin "https://x-access-token:${GH_PAGES_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
 
       - name: Publish
+        if: ${{ !inputs.dry-run }}
         env:
           RELEASE_VERSION: ${{ inputs.version }}
         run: |
