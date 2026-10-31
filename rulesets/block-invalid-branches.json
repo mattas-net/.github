@@ -1,0 +1,28 @@
+{
+  "name": "Block Invalid Branch Patterns",
+  "target": "branch",
+  "enforcement": "active",
+  "conditions": {
+    "ref_name": {
+      "exclude": [
+        "refs/heads/main",
+        "refs/heads/gh-pages",
+        "refs/heads/dev/*",
+        "refs/heads/feature/*",
+        "refs/heads/bugfix/*",
+        "refs/heads/release/[0-9]*.[0-9]*.[0-9]*",
+        "refs/heads/release/[0-9]*.[0-9]*.[0-9]*-*",
+        "refs/heads/release/latest"
+      ],
+      "include": [
+        "refs/heads/*"
+      ]
+    }
+  },
+  "rules": [
+    {
+      "type": "creation"
+    }
+  ],
+  "bypass_actors": []
+}

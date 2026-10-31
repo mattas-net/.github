@@ -1,0 +1,22 @@
+name: Bug report
+description: Something is broken or behaves unexpectedly
+labels: [bug]
+body:
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What you did, what you expected, what you got.
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: Release tag or commit (bare semver, e.g. 1.4.2).
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs or output
+      description: Relevant output. Remove secrets and tokens first.
+      render: shell
