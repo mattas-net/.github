@@ -21,7 +21,16 @@ Nothing is tagged when a check fails, so fix the manifest and re-run.
 
 `workflow_call` inputs: `version` (required), `manifest` (required path),
 `manifest-key`, `require-workflow` (name of the checks workflow; empty skips
-the gate), `title-prefix`. Outputs `tag` and `prerelease`.
+the gate), `title-prefix`, `dry-run` (false: run every check and tag locally,
+then print the push and the release instead of doing them), `notes-file`
+(empty: a repo path whose copy at the tag becomes `--notes-file`; generated
+notes when it is absent). Outputs `tag` and `prerelease`.
+
+Every CI reusable (`python-ci`, `node-ci`, `hacs-ci`, `ios-ci`, `android-ci`,
+`rust-ci`, `infra-ci`) exposes `checks-result` and `security-result`. Callers
+end `checks.yml` with two alias jobs named `checks` and `security` that
+assert those outputs equal `success`, so rulesets require exactly those two
+contexts; the alias block is in each reusable's header comment.
 
 Version lookup by manifest type:
 
@@ -34,9 +43,11 @@ Version lookup by manifest type:
 
 ### node-ci.yml
 
-Lint / typecheck / test (each `--if-present`) and
-`npm audit --omit=dev --audit-level=<audit-level>`. Inputs: `node-version`
-(22), `npm-ci-args` (`--ignore-scripts`), `audit-level` (high).
+Jobs: `checks` (lint / typecheck / test, each `--if-present`) and
+`security` (`npm audit --omit=dev --audit-level=<audit-level>`; dependency
+review on pull requests). Inputs: `working-directory` (`.`), `node-version`
+(24; must equal `.nvmrc` and the Dockerfile `ARG NODE_VERSION`),
+`npm-ci-args` (`--ignore-scripts`), `audit-level` (high).
 
 ### docker-build-push.yml
 
@@ -44,7 +55,7 @@ Builds the Dockerfile and pushes `ghcr.io/mattas-net/<repo>:<tag>` plus
 `latest` (skipped for pre-release tags). Inputs: `ref` (tag to build; empty
 means the run was dispatched from a tag), `build-args`, `platforms`
 (`linux/amd64`; QEMU is set up for others), `verify` (run node-ci first),
-`node-version`, `npm-ci-args`.
+`node-version` (24), `npm-ci-args`.
 
 Optional inputs for non-Node and multi-repo images (defaults keep the
 behavior above):
@@ -96,7 +107,9 @@ job-level concurrency `docs-gh-pages` (never cancelled). Public repos serve
 `gh-pages` with Pages; private repos build it and keep Pages disabled.
 Inputs: `version` (informational; release.yml passes it), `python-version`
 (`3.13`), `install`
-(`python -m pip install --disable-pip-version-check -r requirements-docs.txt`).
+(`python -m pip install --disable-pip-version-check -r requirements-docs.txt`),
+`working-directory` (`.`), `dry-run` (false: when true, build the triggering
+ref with `zensical build --clean --strict` and publish nothing).
 The caller job needs `permissions: contents: write`.
 
 `.github/workflows/docs.yml` (every documented repo; only `with:` overrides
@@ -236,7 +249,8 @@ actionlint on the first matrix entry, `typecheck`, `test`, `extra-checks`,
 `python -m build` + `twine check` when twine is installed) and `security`
 (dependency review on pull requests, then `pip-audit --strict` over `pip freeze --exclude-editable` after
 `audit-install`, which installs the project editable so an unreleased version
-is never looked up on PyPI). Inputs: `python-versions`
+is never looked up on PyPI); `matrix-result` turns the matrix's aggregate
+result into `checks-result`. Inputs: `working-directory` (`.`), `python-versions`
 (`'["3.12"]'`), `install`, `lint-paths` (`.`), `extra-lint`, `typecheck`
 (`python -m mypy`; empty skips), `typecheck-blocking` (true), `test`
 (`python -m pytest -q`), `extra-checks`, `build` (true), `actionlint` (true),
@@ -264,9 +278,29 @@ trusted publisher (or pending publisher, for a new project) for workflow
 
 ### hacs-ci.yml
 
-Jobs `hassfest` and `hacs` (`hacs/action`, category `integration`). Input:
-`hacs-ignore` (`brands`). The HACS check also needs the repository to be
+Jobs `hassfest` and `hacs` (`hacs/action`, category `integration`), which
+feed `checks-result`, and `security` (osv-scanner over the repo's lockfiles).
+Input: `hacs-ignore` (`brands`). The HACS check also needs the repository to be
 public with a description, topics and issues enabled.
+
+### rust-ci.yml
+
+Jobs: `checks` (`cargo fmt --check`, `cargo clippy -D warnings` with
+`features`, `test`, `extra-checks`), `macos` (when `macos` is true:
+`macos-commands` on macos-26) and `security` (cargo-deny, pinned binary:
+`check` per `deny.toml` when present, else `check advisories`). The toolchain
+is the project's `rust-toolchain.toml`, else `toolchain` (stable). Inputs:
+`working-directory`, `toolchain`, `features`, `test` (`cargo test --locked`),
+`extra-checks`, `macos` (false), `macos-commands` (`cargo test --locked`).
+
+### infra-ci.yml
+
+Jobs: `terraform` (fmt, `init -backend=false`, validate per root module under
+`terraform-dirs`), `helm` (lint + `helm template | kubeconform` per chart under
+`helm-dirs`), `shellcheck` (every `*.sh`) and `security` (`trivy config`,
+HIGH/CRITICAL fail, over both directory sets). Every tool is a pinned,
+sha256-verified release binary. Inputs: `terraform-dirs` (`terraform`),
+`helm-dirs` (`kubernetes/helm`).
 
 ### Python caller templates
 
@@ -641,6 +675,10 @@ we-just-might-android, law18-android.
 
 `.github/workflows/checks.yml` lints every workflow in this repository with
 actionlint (release binary pinned by version and verified against its
-sha256). Same triggers and `approve` gate as the caller templates: automatic
-on push to `main`; on pull requests it waits in the `approval` environment.
-Required check (default-branch ruleset): `actionlint`.
+sha256), and its `self-test` jobs run `python-ci`, `node-ci`, `rust-ci` and
+`docs` (`dry-run: true`) from the ref under test against the fixtures in
+`tests/fixtures/<class>/`, so a broken reusable fails before callers pick it
+up from `@main`. Same triggers and `approve` gate as the caller templates:
+automatic on push to `main`; on pull requests it waits in the `approval`
+environment. Required checks (default-branch ruleset): `actionlint` and
+`self-test`.

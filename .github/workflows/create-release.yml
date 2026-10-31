@@ -9,9 +9,13 @@ name: Create Release (reusable)
 #      .properties),
 #   3. refuses if the tag (or a legacy v-tag) already exists,
 #   4. optionally requires the named check workflow to have succeeded on main HEAD,
-#   5. tags main HEAD, pushes the tag, and creates the GitHub Release with
-#      generated notes (pre-release when the version has a hyphen suffix).
+#   5. tags main HEAD, pushes the tag, and creates the GitHub Release
+#      (pre-release when the version has a hyphen suffix) with the notes from
+#      `notes-file` when that file exists at the tag, else generated notes.
 # Nothing is tagged if any check fails, so the run can simply be repeated.
+# dry-run: true runs every check and creates the tag locally, then prints the
+# push and the release it would create instead of doing them. The outputs are
+# still set, so a caller skips its build jobs when it passes dry-run.
 #
 # A release created with GITHUB_TOKEN does not fire `release:` events in other
 # workflows; callers chain the build job after this one (needs:) instead.
@@ -36,6 +40,14 @@ on:
         default: ""
       title-prefix:
         description: Text placed before the version in the release title (defaults to the repo name).
+        type: string
+        default: ""
+      dry-run:
+        description: Run every check and tag locally, but print instead of pushing the tag and creating the release.
+        type: boolean
+        default: false
+      notes-file:
+        description: Repo path of a release-notes file; when it exists at the tag it is passed as --notes-file, else notes are generated.
         type: string
         default: ""
     outputs:
@@ -182,13 +194,18 @@ jobs:
         shell: bash
         env:
           VERSION: ${{ inputs.version }}
+          DRY_RUN: ${{ inputs.dry-run }}
         run: |
           set -euo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git tag -a "$VERSION" -m "Release $VERSION"
-          git push origin "refs/tags/$VERSION"
-          echo "Tagged $(git rev-parse HEAD) as $VERSION"
+          if [ "$DRY_RUN" = "true" ]; then
+            echo "Dry run: would push refs/tags/$VERSION ($(git rev-parse HEAD)) to origin"
+          else
+            git push origin "refs/tags/$VERSION"
+            echo "Tagged $(git rev-parse HEAD) as $VERSION"
+          fi
 
       - name: Create the GitHub release
         shell: bash
@@ -197,12 +214,33 @@ jobs:
           VERSION: ${{ inputs.version }}
           PRERELEASE: ${{ steps.vars.outputs.prerelease }}
           TITLE_PREFIX: ${{ inputs.title-prefix }}
+          DRY_RUN: ${{ inputs.dry-run }}
+          NOTES_FILE: ${{ inputs.notes-file }}
         run: |
           set -euo pipefail
           prefix="${TITLE_PREFIX:-${GITHUB_REPOSITORY#*/}}"
-          args=(--repo "$GITHUB_REPOSITORY" --verify-tag --generate-notes --title "$prefix $VERSION")
+          args=(--repo "$GITHUB_REPOSITORY" --verify-tag --title "$prefix $VERSION")
+          # The notes file is read from the tag itself, so it is the reviewed copy on main.
+          if [ -n "$NOTES_FILE" ] && git cat-file -e "refs/tags/${VERSION}:${NOTES_FILE}" 2>/dev/null; then
+            git show "refs/tags/${VERSION}:${NOTES_FILE}" > "$RUNNER_TEMP/release-notes.md"
+            args+=(--notes-file "$RUNNER_TEMP/release-notes.md")
+            echo "Release notes from $NOTES_FILE"
+          else
+            if [ -n "$NOTES_FILE" ]; then
+              echo "::notice::$NOTES_FILE is not in $VERSION; generating release notes"
+            fi
+            args+=(--generate-notes)
+          fi
           if [ "$PRERELEASE" = "true" ]; then
             args+=(--prerelease)
+          fi
+          if [ "$DRY_RUN" = "true" ]; then
+            echo "Dry run: would run gh release create $VERSION ${args[*]}"
+            if [ -f "$RUNNER_TEMP/release-notes.md" ]; then
+              echo "--- release notes ---"
+              cat "$RUNNER_TEMP/release-notes.md"
+            fi
+            exit 0
           fi
           gh release create "$VERSION" "${args[@]}"
           echo "https://github.com/$GITHUB_REPOSITORY/releases/tag/$VERSION"

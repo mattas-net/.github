@@ -1,0 +1,9 @@
+# Minimal rust fixture for the self-test job in .github/workflows/checks.yml.
+[package]
+name = "rust-ci-fixture"
+version = "0.0.0"
+edition = "2024"
+license = "MIT"
+publish = false
+
+[dependencies]

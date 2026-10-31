@@ -1,0 +1,244 @@
+name: Rust checks (reusable)
+
+# Format-check, lint, test and audit a Rust crate or workspace. Callers run this on push to
+# main (automatic) and on pull requests behind their `approve` gate.
+#
+# Jobs and when they run:
+#   checks    always (ubuntu-24.04)   cargo fmt --check, cargo clippy -D warnings, `test`, `extra-checks`
+#   macos     macos true (macos-26)   `macos-commands`, e.g. the Apple-target checks of a crate with iOS bindings
+#   security  always (ubuntu-24.04)   cargo-deny: `check` (all of deny.toml) when deny.toml exists,
+#                                     else `check advisories` (the RustSec database, as cargo audit)
+# The toolchain is rust-toolchain.toml (or rust-toolchain) when the project has one, else the
+# `toolchain` input; rustfmt and clippy are always added.
+#
+# Outputs:
+#   checks-result    "success" when checks passed, and macos too when it is enabled
+#   security-result  "success" when the security job passed
+# Callers end checks.yml with the two alias jobs from STANDARD.md (`<job>` = the caller job
+# that uses this workflow), so rulesets require exactly `checks` and `security`:
+#
+#   checks:
+#     needs: <job>
+#     if: always()   # a skipped required check counts as passing, so always run and assert
+#     runs-on: ubuntu-24.04
+#     timeout-minutes: 5
+#     steps:
+#       - name: Require the shared checks job
+#         env:
+#           RESULT: ${{ needs.<job>.outputs.checks-result }}
+#         run: test "$RESULT" = success
+#   security:
+#     (same, reading needs.<job>.outputs.security-result)
+on:
+  workflow_call:
+    inputs:
+      working-directory:
+        description: Directory holding Cargo.toml and Cargo.lock, relative to the repo root; every command runs there.
+        type: string
+        default: .
+      toolchain:
+        description: Rust toolchain to install when the project has no rust-toolchain.toml.
+        type: string
+        default: stable
+      features:
+        description: Feature arguments for cargo clippy, e.g. `--all-features` or `--features a,b` (split on whitespace). The test command is run as given.
+        type: string
+        default: ""
+      test:
+        description: Test command.
+        type: string
+        default: cargo test --locked
+      extra-checks:
+        description: Commands run after the tests (e.g. cargo doc with -D warnings, scripts/check-deps.sh); empty skips.
+        type: string
+        default: ""
+      macos:
+        description: Also run `macos-commands` on macos-26 (for crates that ship Apple targets).
+        type: boolean
+        default: false
+      macos-commands:
+        description: Shell run on macos-26 when macos is true, after the toolchain is installed.
+        type: string
+        default: cargo test --locked
+    outputs:
+      checks-result:
+        description: '"success" when checks passed, and macos too when it is enabled.'
+        value: >-
+          ${{ jobs.checks.outputs.result == 'success'
+          && (!inputs.macos || jobs.macos.outputs.result == 'success')
+          && 'success' || 'failure' }}
+      security-result:
+        description: '"success" when the security job passed.'
+        value: ${{ jobs.security.outputs.result }}
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: never
+  CARGO_INCREMENTAL: "0"
+
+# Actions are pinned by commit SHA; the comment names the tag each SHA was resolved from.
+jobs:
+  checks:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    outputs:
+      result: ${{ steps.done.outputs.result }}
+    defaults:
+      run:
+        shell: bash
+        working-directory: ${{ inputs.working-directory }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install the Rust toolchain
+        env:
+          TOOLCHAIN: ${{ inputs.toolchain }}
+        run: |
+          set -euo pipefail
+          if [ -f rust-toolchain.toml ] || [ -f rust-toolchain ]; then
+            rustup toolchain install # the file's channel, components and targets
+          else
+            rustup toolchain install "$TOOLCHAIN" --profile minimal
+            rustup override set "$TOOLCHAIN"
+          fi
+          rustup component add rustfmt clippy
+          rustup show active-toolchain
+
+      - name: Cache the cargo registry
+        # Sources only: cargo checks every crate against Cargo.lock's checksums.
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+          key: cargo-registry-${{ runner.os }}-${{ hashFiles(format('{0}/Cargo.lock', inputs.working-directory), format('{0}/rust-toolchain.toml', inputs.working-directory)) }}
+
+      - name: cargo fmt --check
+        run: cargo fmt --all --check
+
+      - name: cargo clippy
+        env:
+          FEATURES: ${{ inputs.features }}
+        run: |
+          set -euo pipefail
+          # Split on any whitespace, newlines included, without glob or shell expansion.
+          extra=(); while read -ra words; do extra+=(${words[@]+"${words[@]}"}); done <<< "$FEATURES"
+          cargo clippy --workspace --all-targets --locked ${extra[@]+"${extra[@]}"} -- -D warnings
+
+      - name: Test
+        run: ${{ inputs.test }}
+
+      - name: Extra checks
+        if: inputs.extra-checks != ''
+        run: ${{ inputs.extra-checks }}
+
+      - name: Record result
+        id: done
+        run: echo "result=success" >> "$GITHUB_OUTPUT"
+
+  macos:
+    if: inputs.macos
+    runs-on: macos-26
+    timeout-minutes: 60
+    outputs:
+      result: ${{ steps.done.outputs.result }}
+    defaults:
+      run:
+        shell: bash
+        working-directory: ${{ inputs.working-directory }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install the Rust toolchain
+        env:
+          TOOLCHAIN: ${{ inputs.toolchain }}
+        run: |
+          set -euo pipefail
+          if [ -f rust-toolchain.toml ] || [ -f rust-toolchain ]; then
+            rustup toolchain install # the file's channel, components and targets
+          else
+            rustup toolchain install "$TOOLCHAIN" --profile minimal
+            rustup override set "$TOOLCHAIN"
+          fi
+          rustup component add rustfmt clippy
+          rustup show active-toolchain
+
+      - name: Cache the cargo registry
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+          key: cargo-registry-${{ runner.os }}-${{ hashFiles(format('{0}/Cargo.lock', inputs.working-directory), format('{0}/rust-toolchain.toml', inputs.working-directory)) }}
+
+      - name: macOS commands
+        env:
+          MACOS_COMMANDS: ${{ inputs.macos-commands }}
+        run: bash -euo pipefail -c "$MACOS_COMMANDS"
+
+      - name: Record result
+        id: done
+        run: echo "result=success" >> "$GITHUB_OUTPUT"
+
+  # cargo-deny reads the same RustSec advisory database as cargo audit. It is installed from
+  # its release binary, pinned and digest-verified, rather than through rustsec/audit-check,
+  # which installs whatever cargo-audit is current at run time.
+  security:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    outputs:
+      result: ${{ steps.done.outputs.result }}
+    defaults:
+      run:
+        shell: bash
+        working-directory: ${{ inputs.working-directory }}
+    env:
+      CARGO_DENY_VERSION: 0.20.2
+      # sha256 of cargo-deny-0.20.2-x86_64-unknown-linux-musl.tar.gz (matches the release's .sha256 asset)
+      CARGO_DENY_SHA256: 9f12ed4c49936e09b48bf862b595cde2fe64fcbd9d74dfacac6131ca824c8d5f
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # cargo-deny runs `cargo metadata`, which uses the project's pinned toolchain if it has one.
+      - name: Install the project's Rust toolchain
+        if: hashFiles(format('{0}/rust-toolchain.toml', inputs.working-directory), format('{0}/rust-toolchain', inputs.working-directory)) != ''
+        run: rustup toolchain install --profile minimal
+
+      - name: Install cargo-deny (pinned, digest-verified)
+        run: |
+          set -euo pipefail
+          name="cargo-deny-${CARGO_DENY_VERSION}-x86_64-unknown-linux-musl"
+          curl -fsSL -o "${RUNNER_TEMP}/${name}.tar.gz" \
+            "https://github.com/EmbarkStudios/cargo-deny/releases/download/${CARGO_DENY_VERSION}/${name}.tar.gz"
+          echo "${CARGO_DENY_SHA256}  ${RUNNER_TEMP}/${name}.tar.gz" | sha256sum --check --strict
+          mkdir -p "${RUNNER_TEMP}/bin"
+          tar -xzf "${RUNNER_TEMP}/${name}.tar.gz" -C "${RUNNER_TEMP}/bin" --strip-components=1 "${name}/cargo-deny"
+          echo "${RUNNER_TEMP}/bin" >> "$GITHUB_PATH"
+
+      - name: cargo deny
+        run: |
+          set -euo pipefail
+          cargo deny --version
+          if [ -f deny.toml ]; then
+            cargo deny --locked check
+          else
+            echo "No deny.toml: checking advisories only"
+            cargo deny --locked check advisories
+          fi
+
+      - name: Record result
+        id: done
+        run: echo "result=success" >> "$GITHUB_OUTPUT"

@@ -1,0 +1,261 @@
+name: Infra checks (reusable)
+
+# Offline validation of an infrastructure repo: Terraform fmt/validate, Helm lint + kubeconform,
+# ShellCheck, and a Trivy misconfiguration scan. No cloud credentials or secrets: terraform init
+# runs with -backend=false (it downloads providers), kubeconform downloads public schemas, and
+# Trivy downloads its public checks bundle. Every tool is pinned and checksum-verified. Callers
+# run this on push to main (automatic) and on pull requests behind their `approve` gate.
+#
+# Jobs:
+#   terraform   terraform fmt -check, then init -backend=false + validate in every directory
+#               holding *.tf under `terraform-dirs`
+#   helm        helm lint + helm template | kubeconform for every chart directly under `helm-dirs`,
+#               with the chart's values.config.yaml, values.hosts.yaml and
+#               values.secrets.yaml.example when present
+#   shellcheck  every *.sh in the repository
+#   security    trivy config (HIGH and CRITICAL fail) over `terraform-dirs` and `helm-dirs`
+#
+# Outputs:
+#   checks-result    "success" when terraform, helm and shellcheck all passed
+#   security-result  "success" when the security job passed
+# Callers end checks.yml with the two alias jobs from STANDARD.md (`<job>` = the caller job
+# that uses this workflow), so rulesets require exactly `checks` and `security`:
+#
+#   checks:
+#     needs: <job>
+#     if: always()   # a skipped required check counts as passing, so always run and assert
+#     runs-on: ubuntu-24.04
+#     timeout-minutes: 5
+#     steps:
+#       - name: Require the shared checks job
+#         env:
+#           RESULT: ${{ needs.<job>.outputs.checks-result }}
+#         run: test "$RESULT" = success
+#   security:
+#     (same, reading needs.<job>.outputs.security-result)
+on:
+  workflow_call:
+    inputs:
+      terraform-dirs:
+        description: Whitespace-separated directories searched (recursively) for Terraform root modules; empty skips Terraform.
+        type: string
+        default: terraform
+      helm-dirs:
+        description: Whitespace-separated directories whose immediate subdirectories are Helm charts; empty skips Helm.
+        type: string
+        default: kubernetes/helm
+    outputs:
+      checks-result:
+        description: '"success" when terraform, helm and shellcheck all passed.'
+        value: >-
+          ${{ jobs.terraform.outputs.result == 'success'
+          && jobs.helm.outputs.result == 'success'
+          && jobs.shellcheck.outputs.result == 'success'
+          && 'success' || 'failure' }}
+      security-result:
+        description: '"success" when the security job passed.'
+        value: ${{ jobs.security.outputs.result }}
+
+permissions:
+  contents: read
+
+env:
+  TERRAFORM_VERSION: 1.16.6
+  TERRAFORM_SHA256: 38034b38d03096399a7a1264a14561a8029b2b496fd1f169452656e53968f1b7 # terraform_1.16.6_linux_amd64.zip
+  HELM_VERSION: v4.3.1
+  HELM_SHA256: 0403a88ae20913d11b10a2467b50087721fea7581736da6b9d3992f5357fe54b # helm-v4.3.1-linux-amd64.tar.gz
+  KUBECONFORM_VERSION: v0.8.0
+  KUBECONFORM_SHA256: 9bc2bffbf71f261128533edaf912153948b7ff238f9a531ae6d34466ec287883 # kubeconform-linux-amd64.tar.gz
+  SHELLCHECK_VERSION: v0.11.0
+  SHELLCHECK_SHA256: 8c3be12b05d5c177a04c29e3c78ce89ac86f1595681cab149b65b97c4e227198 # shellcheck-v0.11.0.linux.x86_64.tar.xz
+  TRIVY_VERSION: 0.76.1
+  TRIVY_SHA256: c7cbe3137fb8a48a17574bede3dd6beb16742d1e9772929940fc90082c39d9c0 # trivy_0.76.1_Linux-64bit.tar.gz
+
+# Actions are pinned by commit SHA; the comment names the tag each SHA was resolved from.
+jobs:
+  terraform:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    outputs:
+      result: ${{ steps.done.outputs.result }}
+    env:
+      CHECKPOINT_DISABLE: "1"
+      TF_IN_AUTOMATION: "1"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        if: inputs.terraform-dirs != ''
+        with:
+          persist-credentials: false
+
+      - name: Install Terraform
+        if: inputs.terraform-dirs != ''
+        run: |
+          set -euo pipefail
+          curl -fsSLo "$RUNNER_TEMP/terraform.zip" "https://releases.hashicorp.com/terraform/${TERRAFORM_VERSION}/terraform_${TERRAFORM_VERSION}_linux_amd64.zip"
+          echo "${TERRAFORM_SHA256}  $RUNNER_TEMP/terraform.zip" | sha256sum -c -
+          mkdir -p "$RUNNER_TEMP/bin"
+          unzip -q "$RUNNER_TEMP/terraform.zip" terraform -d "$RUNNER_TEMP/bin"
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+
+      - name: terraform fmt + init + validate (every root module)
+        if: inputs.terraform-dirs != ''
+        env:
+          TERRAFORM_DIRS: ${{ inputs.terraform-dirs }}
+        run: |
+          set -uo pipefail
+          read -ra roots <<< "$(tr '\n' ' ' <<< "$TERRAFORM_DIRS")"
+          status=0
+          for root in "${roots[@]}"; do
+            if [[ ! -d "$root" ]]; then
+              echo "::error::terraform-dirs entry '$root' is not a directory"
+              status=1
+              continue
+            fi
+            terraform fmt -check -recursive -diff "$root" || status=1
+            while IFS= read -r dir; do
+              echo "::group::$dir"
+              terraform -chdir="$dir" init -backend=false -input=false -no-color || status=1
+              terraform -chdir="$dir" validate -no-color || status=1
+              echo "::endgroup::"
+            done < <(find "$root" -name '*.tf' -not -path '*/.terraform/*' -exec dirname {} \; | sort -u)
+          done
+          exit "$status"
+
+      - name: Record result
+        id: done
+        run: echo "result=success" >> "$GITHUB_OUTPUT"
+
+  helm:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    outputs:
+      result: ${{ steps.done.outputs.result }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        if: inputs.helm-dirs != ''
+        with:
+          persist-credentials: false
+
+      - name: Install Helm and kubeconform
+        if: inputs.helm-dirs != ''
+        run: |
+          set -euo pipefail
+          curl -fsSLo "$RUNNER_TEMP/helm.tgz" "https://get.helm.sh/helm-${HELM_VERSION}-linux-amd64.tar.gz"
+          echo "${HELM_SHA256}  $RUNNER_TEMP/helm.tgz" | sha256sum -c -
+          curl -fsSLo "$RUNNER_TEMP/kubeconform.tgz" "https://github.com/yannh/kubeconform/releases/download/${KUBECONFORM_VERSION}/kubeconform-linux-amd64.tar.gz"
+          echo "${KUBECONFORM_SHA256}  $RUNNER_TEMP/kubeconform.tgz" | sha256sum -c -
+          mkdir -p "$RUNNER_TEMP/bin"
+          tar -xzf "$RUNNER_TEMP/helm.tgz" -C "$RUNNER_TEMP/bin" --strip-components=1 linux-amd64/helm
+          tar -xzf "$RUNNER_TEMP/kubeconform.tgz" -C "$RUNNER_TEMP/bin" kubeconform
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+
+      # Each chart gets the values files the deploy uses (values.config.yaml, plus the committed
+      # values.secrets.yaml.example standing in for the gitignored secrets file) and any
+      # values.hosts.yaml. Subcharts are vendored, so no repository access is needed.
+      # CRD-based resources (Gateway API, cert-manager) have no built-in schema and are skipped.
+      - name: helm lint + template | kubeconform (every chart)
+        if: inputs.helm-dirs != ''
+        env:
+          HELM_DIRS: ${{ inputs.helm-dirs }}
+        run: |
+          set -uo pipefail
+          read -ra roots <<< "$(tr '\n' ' ' <<< "$HELM_DIRS")"
+          status=0
+          for root in "${roots[@]}"; do
+            if [[ ! -d "$root" ]]; then
+              echo "::error::helm-dirs entry '$root' is not a directory"
+              status=1
+              continue
+            fi
+            for chart in "$root"/*/; do
+              chart="${chart%/}"
+              [[ -f "$chart/Chart.yaml" ]] || continue
+              args=()
+              for f in "$chart"/values.config.yaml "$chart"/values.hosts.yaml "$chart"/values.secrets.yaml.example; do
+                if [[ -f "$f" ]]; then args+=(-f "$f"); fi
+              done
+              echo "::group::$chart"
+              helm lint "$chart" ${args[@]+"${args[@]}"} || status=1
+              helm template ci "$chart" --namespace ci ${args[@]+"${args[@]}"} \
+                | kubeconform -strict -ignore-missing-schemas -summary || status=1
+              echo "::endgroup::"
+            done
+          done
+          exit "$status"
+
+      - name: Record result
+        id: done
+        run: echo "result=success" >> "$GITHUB_OUTPUT"
+
+  shellcheck:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    outputs:
+      result: ${{ steps.done.outputs.result }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install ShellCheck
+        run: |
+          set -euo pipefail
+          curl -fsSLo "$RUNNER_TEMP/shellcheck.tar.xz" "https://github.com/koalaman/shellcheck/releases/download/${SHELLCHECK_VERSION}/shellcheck-${SHELLCHECK_VERSION}.linux.x86_64.tar.xz"
+          echo "${SHELLCHECK_SHA256}  $RUNNER_TEMP/shellcheck.tar.xz" | sha256sum -c -
+          mkdir -p "$RUNNER_TEMP/bin"
+          tar -xJf "$RUNNER_TEMP/shellcheck.tar.xz" -C "$RUNNER_TEMP/bin" --strip-components=1 "shellcheck-${SHELLCHECK_VERSION}/shellcheck"
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+
+      - name: shellcheck (every *.sh)
+        run: |
+          set -euo pipefail
+          shellcheck --version
+          find . -name '*.sh' -not -path './.git/*' -print0 | xargs -0 --no-run-if-empty shellcheck
+
+      - name: Record result
+        id: done
+        run: echo "result=success" >> "$GITHUB_OUTPUT"
+
+  # Trivy is installed from its release binary, pinned and digest-verified like the other
+  # tools here, rather than through a wrapper action that downloads it at run time.
+  security:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    outputs:
+      result: ${{ steps.done.outputs.result }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install Trivy
+        run: |
+          set -euo pipefail
+          curl -fsSLo "$RUNNER_TEMP/trivy.tgz" "https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz"
+          echo "${TRIVY_SHA256}  $RUNNER_TEMP/trivy.tgz" | sha256sum -c -
+          mkdir -p "$RUNNER_TEMP/bin"
+          tar -xzf "$RUNNER_TEMP/trivy.tgz" -C "$RUNNER_TEMP/bin" trivy
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+
+      - name: trivy config (Terraform and Helm)
+        env:
+          SCAN_DIRS: ${{ inputs.terraform-dirs }} ${{ inputs.helm-dirs }}
+        run: |
+          set -uo pipefail
+          trivy --version
+          read -ra dirs <<< "$(tr '\n' ' ' <<< "$SCAN_DIRS")"
+          if [[ ${#dirs[@]} -eq 0 ]]; then
+            echo "::warning::terraform-dirs and helm-dirs are both empty; nothing to scan."
+            exit 0
+          fi
+          status=0
+          for dir in "${dirs[@]}"; do
+            echo "::group::$dir"
+            trivy config --exit-code 1 --severity HIGH,CRITICAL --no-progress "$dir" || status=1
+            echo "::endgroup::"
+          done
+          exit "$status"
+
+      - name: Record result
+        id: done
+        run: echo "result=success" >> "$GITHUB_OUTPUT"

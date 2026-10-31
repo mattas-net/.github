@@ -1,10 +1,13 @@
 name: Checks
 
-# Checks for this repository's own workflows: actionlint over .github/workflows.
+# Checks for this repository's own workflows: actionlint over .github/workflows, and a
+# self-test that runs python-ci, node-ci, rust-ci and docs (dry run) from this ref against
+# the fixtures under tests/fixtures/<class>/, so a broken reusable fails here before callers
+# pick it up from @main. Local `uses: ./...` paths resolve to the commit under test.
 # Runs automatically on push to main; on pull requests the run waits at the `approve` job
 # (no runner minutes) until a required reviewer approves it in the `approval` environment.
 # A manually dispatched run does not attach to a PR, so it cannot satisfy the gate.
-# Required checks (default-branch ruleset): "actionlint".
+# Required checks (default-branch ruleset): "actionlint" and "self-test".
 on:
   push:
     branches: [main]
@@ -58,3 +61,73 @@ jobs:
 
       - name: Lint workflows
         run: '"${RUNNER_TEMP}/actionlint" -color'
+
+  # A job's `uses:` cannot come from a matrix, so each reusable gets its own job; the
+  # self-test job below is the one required check that asserts all of them.
+  self-test-python:
+    needs: approve
+    if: always() && needs.approve.result != 'failure' && needs.approve.result != 'cancelled'
+    uses: ./.github/workflows/python-ci.yml
+    permissions:
+      contents: read
+    with:
+      working-directory: tests/fixtures/python
+      python-versions: '["3.13"]'
+      actionlint: false
+      cache-dependency-path: tests/fixtures/python/pyproject.toml
+
+  self-test-node:
+    needs: approve
+    if: always() && needs.approve.result != 'failure' && needs.approve.result != 'cancelled'
+    uses: ./.github/workflows/node-ci.yml
+    permissions:
+      contents: read
+    with:
+      working-directory: tests/fixtures/node
+      node-version: "24"
+
+  self-test-rust:
+    needs: approve
+    if: always() && needs.approve.result != 'failure' && needs.approve.result != 'cancelled'
+    uses: ./.github/workflows/rust-ci.yml
+    permissions:
+      contents: read
+    with:
+      working-directory: tests/fixtures/rust
+
+  self-test-docs:
+    needs: approve
+    if: always() && needs.approve.result != 'failure' && needs.approve.result != 'cancelled'
+    uses: ./.github/workflows/docs.yml
+    # docs.yml's job requests contents: write for its publish mode, and a called job cannot be
+    # granted more than its caller; with dry-run it checks out, builds and pushes nothing.
+    permissions:
+      contents: write
+    with:
+      working-directory: tests/fixtures/docs
+      dry-run: true
+
+  self-test:
+    needs: [approve, self-test-python, self-test-node, self-test-rust, self-test-docs]
+    # always(): a rejected approval or a failed reusable must fail this required check, not skip it.
+    if: always()
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Require every reusable to pass on its fixture
+        env:
+          PYTHON_CHECKS: ${{ needs.self-test-python.outputs.checks-result }}
+          PYTHON_SECURITY: ${{ needs.self-test-python.outputs.security-result }}
+          NODE_CHECKS: ${{ needs.self-test-node.outputs.checks-result }}
+          NODE_SECURITY: ${{ needs.self-test-node.outputs.security-result }}
+          RUST_CHECKS: ${{ needs.self-test-rust.outputs.checks-result }}
+          RUST_SECURITY: ${{ needs.self-test-rust.outputs.security-result }}
+          DOCS: ${{ needs.self-test-docs.result }}
+        run: |
+          status=0
+          for name in PYTHON_CHECKS PYTHON_SECURITY NODE_CHECKS NODE_SECURITY RUST_CHECKS RUST_SECURITY DOCS; do
+            value="${!name}"
+            echo "$name=${value:-<empty>}"
+            if [ "$value" != success ]; then status=1; fi
+          done
+          exit "$status"
