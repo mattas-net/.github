@@ -84,7 +84,7 @@ jobs:
 
       # Version lookup by manifest type:
       #   .json        .version
-      #   .toml        [project], [package] or [tool.poetry] version
+      #   .toml        [project], [package], [tool.poetry] or [workspace.package] version (first found)
       #   .yml/.yaml   every `<key>:` line at any indentation (top level or nested under
       #                settings/targets), key default MARKETING_VERSION; all occurrences
       #                must agree. App Store versions are numeric, so a pre-release
@@ -126,7 +126,7 @@ jobs:
           import sys, tomllib
           with open(sys.argv[1], "rb") as f:
               data = tomllib.load(f)
-          for key in ("project", "package", "tool.poetry"):
+          for key in ("project", "package", "tool.poetry", "workspace.package"):
               node = data
               for part in key.split("."):
                   node = node.get(part, {}) if isinstance(node, dict) else {}

@@ -1,0 +1,60 @@
+name: Checks
+
+# Checks for this repository's own workflows: actionlint over .github/workflows.
+# Runs automatically on push to main; on pull requests the run waits at the `approve` job
+# (no runner minutes) until a required reviewer approves it in the `approval` environment.
+# A manually dispatched run does not attach to a PR, so it cannot satisfy the gate.
+# Required checks (default-branch ruleset): "actionlint".
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: checks-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+# Actions are pinned by commit SHA; the comment names the tag each SHA was resolved from.
+jobs:
+  approve:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
+    environment: approval
+    steps:
+      - run: echo "Checks approved by ${GITHUB_TRIGGERING_ACTOR}"
+
+  actionlint:
+    needs: approve
+    # always(): a rejected or cancelled approval must fail this required check, not skip it (a skipped required check counts as passing).
+    if: always()
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      ACTIONLINT_VERSION: 1.7.12
+      # sha256 of actionlint_1.7.12_linux_amd64.tar.gz from the release's checksums.txt
+      ACTIONLINT_SHA256: 8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8
+    steps:
+      - name: Require approval
+        if: needs.approve.result == 'failure' || needs.approve.result == 'cancelled'
+        run: |
+          echo "::error::Checks were not approved"
+          exit 1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install actionlint
+        run: |
+          set -euo pipefail
+          archive="actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
+          curl -fsSL -o "${RUNNER_TEMP}/${archive}" \
+            "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/${archive}"
+          echo "${ACTIONLINT_SHA256}  ${RUNNER_TEMP}/${archive}" | sha256sum --check --strict
+          tar -xzf "${RUNNER_TEMP}/${archive}" -C "${RUNNER_TEMP}" actionlint
+
+      - name: Lint workflows
+        run: '"${RUNNER_TEMP}/actionlint" -color'

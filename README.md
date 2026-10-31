@@ -28,7 +28,7 @@ Version lookup by manifest type:
 | Manifest | Read from |
 |---|---|
 | `.json` | `.version` |
-| `.toml` | `[project]`, `[package]` or `[tool.poetry]` `version` |
+| `.toml` | the first of `[project]`, `[package]`, `[tool.poetry]`, `[workspace.package]` that has a `version` (a Cargo workspace root holds only `[workspace.package]`) |
 | `.yml` / `.yaml` | every `<manifest-key>:` line (default `MARKETING_VERSION`) at any indentation, so top level or nested under `settings`/`targets`; all must agree. A pre-release `1.4.2-beta1` matches `1.4.2`, because App Store versions are numeric. |
 | `.properties` | the `<manifest-key>=` line (default `version`), e.g. `wjm.versionName`. Like the iOS manifest it holds `X.Y.Z`: a pre-release `1.4.2-beta1` matches `1.4.2`. |
 
@@ -45,6 +45,97 @@ Builds the Dockerfile and pushes `ghcr.io/mattas-net/<repo>:<tag>` plus
 means the run was dispatched from a tag), `build-args`, `platforms`
 (`linux/amd64`; QEMU is set up for others), `verify` (run node-ci first),
 `node-version`, `npm-ci-args`.
+
+Optional inputs for non-Node and multi-repo images (defaults keep the
+behavior above):
+
+- `image-tag` (empty): push exactly this tag (e.g. `dev`) from any ref —
+  `ref`, or the ref the run was dispatched from — with no `latest`.
+- `context` (`.`) and `file` (`./Dockerfile`), both relative to the
+  workspace root.
+- `path` (empty = workspace root): where the caller repo is checked out.
+- `extra-repository` (empty skips), `extra-path`, `extra-ref-file`: check out
+  a second repository at `extra-path`, at the ref/SHA on the first line of
+  `extra-ref-file` (a path from the workspace root; empty = default branch).
+- Secret `extra-ssh-key` (optional): deploy key for a private
+  `extra-repository`.
+
+we-just-might-server (Rust) builds against `we-just-might-core`:
+
+```yaml
+  image:
+    needs: release
+    uses: mattas-net/.github/.github/workflows/docker-build-push.yml@main
+    permissions:
+      contents: read
+      packages: write
+    secrets:
+      extra-ssh-key: ${{ secrets.WJM_CORE_DEPLOY_KEY }}
+    with:
+      ref: ${{ inputs.version }}
+      verify: false
+      path: we-just-might-server
+      file: we-just-might-server/Dockerfile
+      extra-repository: mattas-net/we-just-might-core
+      extra-path: we-just-might-core
+      extra-ref-file: we-just-might-server/scripts/core-ref
+```
+
+Its `release.yml` uses `manifest: Cargo.toml` (the workspace root).
+
+### docs.yml
+
+Builds every documented version with Zensical and publishes the versioned
+site (mike) to the caller's `gh-pages` branch by running the caller's
+`scripts/publish_versioned_docs.py --push`: `dev` = `main`, `X.Y` = newest
+patch tag of each documented minor line, `latest` = highest stable release.
+Job `publish` checks out `main` with full history (every release tag is
+rebuilt from its own sources), installs the tools, sets the
+`github-actions[bot]` author and a token remote, and publishes under
+job-level concurrency `docs-gh-pages` (never cancelled). Public repos serve
+`gh-pages` with Pages; private repos build it and keep Pages disabled.
+Inputs: `version` (informational; release.yml passes it), `python-version`
+(`3.13`), `install`
+(`python -m pip install --disable-pip-version-check -r requirements-docs.txt`).
+The caller job needs `permissions: contents: write`.
+
+`.github/workflows/docs.yml` (every documented repo; only `with:` overrides
+may differ)
+
+```yaml
+name: Docs
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+  workflow_call:
+    inputs:
+      version:
+        description: Release version that triggered the publish (informational)
+        type: string
+        default: ""
+permissions:
+  contents: read
+jobs:
+  docs:
+    uses: mattas-net/.github/.github/workflows/docs.yml@main
+    permissions:
+      contents: write # the publish script pushes the gh-pages branch
+    with:
+      version: ${{ inputs.version }}
+```
+
+`release.yml` ends with a job that republishes after tagging:
+
+```yaml
+  docs:
+    needs: release
+    uses: ./.github/workflows/docs.yml
+    permissions:
+      contents: write
+    with:
+      version: ${{ inputs.version }}
+```
 
 ## Caller templates
 
@@ -153,22 +244,11 @@ is never looked up on PyPI). Inputs: `python-versions`
 (`**/pyproject.toml` and `**/requirements*.txt`; setup-python fails when no
 file matches).
 
-### codeql.yml
+### CodeQL
 
-One `analyze` job (input `languages`, default `python`) for repos without
-CodeQL default setup. It is a separate workflow because GitHub checks a nested
-job's permissions before its `if:`, so an opt-in job inside python-ci.yml
-would force every caller to grant `security-events: write`. Caller job:
-
-```yaml
-  codeql:
-    needs: approve
-    if: always() && needs.approve.result != 'failure' && needs.approve.result != 'cancelled'
-    uses: mattas-net/.github/.github/workflows/codeql.yml@main
-    permissions:
-      contents: read
-      security-events: write
-```
+There is no shared CodeQL workflow: every repo uses CodeQL default setup
+(repository settings), with languages limited to real source code. Callers do
+not add a `codeql` job.
 
 ### python-build.yml
 
@@ -556,3 +636,11 @@ with `android-ci.yml` (job id `check`) and
 
 Used by: we-just-might-ios, law18-ios, oh-toto, ok-rocket (CI only),
 we-just-might-android, law18-android.
+
+## This repository's checks
+
+`.github/workflows/checks.yml` lints every workflow in this repository with
+actionlint (release binary pinned by version and verified against its
+sha256). Same triggers and `approve` gate as the caller templates: automatic
+on push to `main`; on pull requests it waits in the `approval` environment.
+Required check (default-branch ruleset): `actionlint`.
