@@ -11,10 +11,29 @@ name: Apple CI (reusable)
 #   app-build        app-build true          xcodebuild build, signing disabled
 #   app-test         app-test true           xcodebuild test on a simulator (or the Mac)
 #   archive-validate archive-validate true   signed archive + export; only on refs/heads/main
+#   security         always (ubuntu-24.04)   osv-scanner over the repo's lockfiles (Package.resolved, ...)
 #
-# Each job sets a `<job>-result` workflow output to "success" when it passes, so a caller
-# whose branch ruleset requires a bare check name (e.g. `test`) can keep a thin job of that
-# name that reads the result.
+# Outputs:
+#   checks-result    "success" when every configured job of test, lint, app-build and app-test
+#                    passed and at least one of test / app-test is configured
+#   security-result  "success" when the security job passed
+#   test-result, lint-result, app-build-result, app-test-result
+#                    per-job results; deprecated, kept for one release (removed in WP-2d)
+# Callers end checks.yml with the two alias jobs from STANDARD.md (`<job>` = the caller job
+# that uses this workflow), so rulesets require exactly `checks` and `security`:
+#
+#   checks:
+#     needs: <job>
+#     if: always()   # a skipped required check counts as passing, so always run and assert
+#     runs-on: ubuntu-24.04
+#     timeout-minutes: 5
+#     steps:
+#       - name: Require the shared checks job
+#         env:
+#           RESULT: ${{ needs.<job>.outputs.checks-result }}
+#         run: test "$RESULT" = success
+#   security:
+#     (same, reading needs.<job>.outputs.security-result)
 #
 # The XcodeGen project (project-dir/project.yml) is generated on the runner; a repo with a
 # checked-in .xcodeproj sets xcodegen: false. rust-core-ref is for the We Just Might apps:
@@ -167,17 +186,29 @@ on:
         description: Base64 GoogleService-Info.plist (google-service-info-plist only).
         required: false
     outputs:
+      checks-result:
+        description: '"success" when every configured job of test, lint, app-build and app-test passed and at least one of test / app-test is configured.'
+        value: >-
+          ${{ (inputs.package-path != '' || inputs.app-test)
+          && (inputs.package-path == '' || jobs.test.outputs.result == 'success')
+          && (!inputs.lint || jobs.lint.outputs.result == 'success')
+          && (!inputs.app-build || jobs.app-build.outputs.result == 'success')
+          && (!inputs.app-test || jobs.app-test.outputs.result == 'success')
+          && 'success' || 'failure' }}
+      security-result:
+        description: '"success" when the security job passed.'
+        value: ${{ jobs.security.outputs.result }}
       test-result:
-        description: '"success" when the test job passed.'
+        description: '"success" when the test job passed (deprecated: use checks-result).'
         value: ${{ jobs.test.outputs.result }}
       lint-result:
-        description: '"success" when the lint job passed.'
+        description: '"success" when the lint job passed (deprecated: use checks-result).'
         value: ${{ jobs.lint.outputs.result }}
       app-build-result:
-        description: '"success" when the app-build job passed.'
+        description: '"success" when the app-build job passed (deprecated: use checks-result).'
         value: ${{ jobs.app-build.outputs.result }}
       app-test-result:
-        description: '"success" when the app-test job passed.'
+        description: '"success" when the app-test job passed (deprecated: use checks-result).'
         value: ${{ jobs.app-test.outputs.result }}
 
 permissions:
@@ -239,7 +270,11 @@ jobs:
             fi
             sudo xcode-select -s "$app"
             # Fail unless the selected toolchain reports the pinned version (any patch).
-            reported="$(xcodebuild -version | head -n 1)"
+            # Capture the whole output, then keep the first line: `xcodebuild -version | head -n 1`
+            # under pipefail lets head close the pipe early, and xcodebuild aborts on the broken
+            # pipe (NSFileHandleOperationException, exit 134).
+            reported="$(xcodebuild -version)"
+            reported="${reported%%$'\n'*}"
             if ! [[ "$reported" == "Xcode $version" || "$reported" == "Xcode $version."* ]]; then
               echo "::error::Selected $app reports '$reported', not Xcode $version"
               exit 1
@@ -268,7 +303,12 @@ jobs:
       - name: Resolve Swift toolchain version
         id: swift
         shell: bash
-        run: echo "version=$(swift --version 2>&1 | head -n 1 | tr -c 'A-Za-z0-9.\n' '-')" >> "$GITHUB_OUTPUT"
+        run: |
+          set -euo pipefail
+          # Whole output first, then the first line (no `| head` under pipefail; see Select Xcode).
+          version="$(swift --version 2>&1)"
+          version="${version%%$'\n'*}"
+          echo "version=$(printf '%s\n' "$version" | tr -c 'A-Za-z0-9.\n' '-')" >> "$GITHUB_OUTPUT"
 
       - name: Cache SwiftPM build
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
@@ -409,7 +449,11 @@ jobs:
             fi
             sudo xcode-select -s "$app"
             # Fail unless the selected toolchain reports the pinned version (any patch).
-            reported="$(xcodebuild -version | head -n 1)"
+            # Capture the whole output, then keep the first line: `xcodebuild -version | head -n 1`
+            # under pipefail lets head close the pipe early, and xcodebuild aborts on the broken
+            # pipe (NSFileHandleOperationException, exit 134).
+            reported="$(xcodebuild -version)"
+            reported="${reported%%$'\n'*}"
             if ! [[ "$reported" == "Xcode $version" || "$reported" == "Xcode $version."* ]]; then
               echo "::error::Selected $app reports '$reported', not Xcode $version"
               exit 1
@@ -581,7 +625,11 @@ jobs:
             fi
             sudo xcode-select -s "$app"
             # Fail unless the selected toolchain reports the pinned version (any patch).
-            reported="$(xcodebuild -version | head -n 1)"
+            # Capture the whole output, then keep the first line: `xcodebuild -version | head -n 1`
+            # under pipefail lets head close the pipe early, and xcodebuild aborts on the broken
+            # pipe (NSFileHandleOperationException, exit 134).
+            reported="$(xcodebuild -version)"
+            reported="${reported%%$'\n'*}"
             if ! [[ "$reported" == "Xcode $version" || "$reported" == "Xcode $version."* ]]; then
               echo "::error::Selected $app reports '$reported', not Xcode $version"
               exit 1
@@ -690,6 +738,57 @@ jobs:
         id: done
         run: echo "result=success" >> "$GITHUB_OUTPUT"
 
+  # Dependency vulnerabilities: osv-scanner over every lockfile in the repository. It is a
+  # Docker action, so it runs on Linux whatever the platform; it fails on any known
+  # vulnerability (add `--config` with an ignore file only if a repo later needs one).
+  security:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    outputs:
+      result: ${{ steps.done.outputs.result }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.ref }}
+          persist-credentials: false
+
+      # osv-scanner exits 128 ("no packages found") on a repo with nothing to scan; report
+      # that as a warning instead of failing the job.
+      - name: Find lockfiles
+        id: lockfiles
+        shell: bash
+        run: |
+          set -euo pipefail
+          found="$(find . -path ./.git -prune -o -type f \( \
+            -name Package.resolved -o -name '*requirements*.txt' -o -name '*.lockfile' \
+            -o -name verification-metadata.xml -o -name package-lock.json -o -name yarn.lock \
+            -o -name pnpm-lock.yaml -o -name Cargo.lock -o -name poetry.lock -o -name uv.lock \
+            -o -name Pipfile.lock -o -name pdm.lock -o -name pylock.toml -o -name go.mod \
+            -o -name Gemfile.lock -o -name composer.lock -o -name pubspec.lock \
+            \) -print)"
+          if [ -n "$found" ]; then
+            printf 'Lockfiles:\n%s\n' "$found"
+            echo "found=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::warning::No lockfile that osv-scanner reads; nothing to scan."
+            echo "found=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: osv-scanner
+        if: steps.lockfiles.outputs.found == 'true'
+        uses: google/osv-scanner-action/osv-scanner-action@b1d267aea5211fa648d9d442fa64b90dbdcbdd36 # v2.7.0
+        with:
+          scan-args: |
+            --recursive
+            ./
+
+      - name: Record result
+        id: done
+        run: echo "result=success" >> "$GITHUB_OUTPUT"
+
   # Signed archive + export, opt-in. The job hands the distribution certificate to a build
   # of the checked-out code; on any branch but main, whoever can push to that branch controls
   # that code and could exfiltrate the signing material, so it only runs on main.
@@ -742,7 +841,11 @@ jobs:
             fi
             sudo xcode-select -s "$app"
             # Fail unless the selected toolchain reports the pinned version (any patch).
-            reported="$(xcodebuild -version | head -n 1)"
+            # Capture the whole output, then keep the first line: `xcodebuild -version | head -n 1`
+            # under pipefail lets head close the pipe early, and xcodebuild aborts on the broken
+            # pipe (NSFileHandleOperationException, exit 134).
+            reported="$(xcodebuild -version)"
+            reported="${reported%%$'\n'*}"
             if ! [[ "$reported" == "Xcode $version" || "$reported" == "Xcode $version."* ]]; then
               echo "::error::Selected $app reports '$reported', not Xcode $version"
               exit 1

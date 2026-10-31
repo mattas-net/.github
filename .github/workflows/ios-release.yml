@@ -326,7 +326,11 @@ jobs:
             fi
             sudo xcode-select -s "$app"
             # Fail unless the selected toolchain reports the pinned version (any patch).
-            reported="$(xcodebuild -version | head -n 1)"
+            # Capture the whole output, then keep the first line: `xcodebuild -version | head -n 1`
+            # under pipefail lets head close the pipe early, and xcodebuild aborts on the broken
+            # pipe (NSFileHandleOperationException, exit 134).
+            reported="$(xcodebuild -version)"
+            reported="${reported%%$'\n'*}"
             if ! [[ "$reported" == "Xcode $version" || "$reported" == "Xcode $version."* ]]; then
               echo "::error::Selected $app reports '$reported', not Xcode $version"
               exit 1
@@ -563,7 +567,12 @@ jobs:
           name="${GITHUB_REPOSITORY#*/}-${VERSION}"
           assets="$RUNNER_TEMP/release-assets"
           mkdir -p "$assets"
-          ipa="$(find "$RUNNER_TEMP/export" -maxdepth 1 -type f -name '*.ipa' | head -n1)"
+          # -print -quit, not `| head -n1`: under pipefail head can close the pipe on find.
+          ipa="$(find "$RUNNER_TEMP/export" -maxdepth 1 -type f -name '*.ipa' -print -quit)"
+          if [ -z "$ipa" ]; then
+            echo "::error::No .ipa in $RUNNER_TEMP/export"
+            exit 1
+          fi
           cp "$ipa" "$assets/$name.ipa"
           files=("$assets/$name.ipa")
           dsyms="$RUNNER_TEMP/App.xcarchive/dSYMs"

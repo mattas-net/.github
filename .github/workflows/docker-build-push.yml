@@ -34,9 +34,9 @@ on:
         type: boolean
         default: true
       node-version:
-        description: Passed to node-ci.yml when verify is true.
+        description: Passed to node-ci.yml when verify is true; Node major, must equal `.nvmrc` and the Dockerfile `ARG NODE_VERSION`.
         type: string
-        default: "22"
+        default: "24"
       npm-ci-args:
         description: Passed to node-ci.yml when verify is true.
         type: string
@@ -137,7 +137,7 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
       - name: Checkout repository
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ steps.vars.outputs.ref }}
           path: ${{ inputs.path }}
@@ -167,7 +167,7 @@ jobs:
 
       - name: Checkout extra repository
         if: inputs.extra-repository != ''
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: ${{ inputs.extra-repository }}
           ref: ${{ steps.extra.outputs.ref }}

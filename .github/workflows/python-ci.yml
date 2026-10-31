@@ -5,11 +5,33 @@ name: Python checks (reusable)
 # toolset), so `install` must put ruff on the path. Callers run this on push to
 # main (automatic) and on pull requests behind their `approve` gate.
 #
-# Check contexts seen by a ruleset are `<caller job> / checks (<python>)` and
-# `<caller job> / security`.
+# Outputs:
+#   checks-result    "success" when every python-versions leg of the checks job passed
+#                    (aggregated by the matrix-result job)
+#   security-result  "success" when the security job passed
+# Callers end checks.yml with the two alias jobs from STANDARD.md (`<job>` = the caller job
+# that uses this workflow), so rulesets require exactly `checks` and `security` and a
+# python-versions change never invalidates a ruleset:
+#
+#   checks:
+#     needs: <job>
+#     if: always()   # a skipped required check counts as passing, so always run and assert
+#     runs-on: ubuntu-24.04
+#     timeout-minutes: 5
+#     steps:
+#       - name: Require the shared checks job
+#         env:
+#           RESULT: ${{ needs.<job>.outputs.checks-result }}
+#         run: test "$RESULT" = success
+#   security:
+#     (same, reading needs.<job>.outputs.security-result)
 on:
   workflow_call:
     inputs:
+      working-directory:
+        description: Directory holding the project (pyproject.toml), relative to the repo root; every command runs there.
+        type: string
+        default: .
       python-versions:
         description: JSON array of Python versions to test, e.g. '["3.12", "3.13"]'.
         type: string
@@ -64,6 +86,13 @@ on:
         default: |
           **/pyproject.toml
           **/requirements*.txt
+    outputs:
+      checks-result:
+        description: '"success" when every python-versions leg of the checks job passed.'
+        value: ${{ jobs.matrix-result.outputs.result }}
+      security-result:
+        description: '"success" when the security job passed.'
+        value: ${{ jobs.security.outputs.result }}
 
 # Actions are pinned by commit SHA; the comment names the tag each SHA was resolved from.
 jobs:
@@ -71,6 +100,9 @@ jobs:
     runs-on: ubuntu-24.04
     permissions:
       contents: read
+    defaults:
+      run:
+        working-directory: ${{ inputs.working-directory }}
     strategy:
       fail-fast: false
       matrix:
@@ -107,7 +139,19 @@ jobs:
 
       - name: Lint workflows (actionlint)
         if: inputs.actionlint && strategy.job-index == 0
-        run: docker run --rm -v "${PWD}:/repo" --workdir /repo rhysd/actionlint:1.7.12 -color
+        working-directory: ${{ github.workspace }}
+        env:
+          ACTIONLINT_VERSION: 1.7.12
+          # sha256 of actionlint_1.7.12_linux_amd64.tar.gz from the release's checksums.txt
+          ACTIONLINT_SHA256: 8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8
+        run: |
+          set -euo pipefail
+          archive="actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
+          curl -fsSL -o "${RUNNER_TEMP}/${archive}" \
+            "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/${archive}"
+          echo "${ACTIONLINT_SHA256}  ${RUNNER_TEMP}/${archive}" | sha256sum --check --strict
+          tar -xzf "${RUNNER_TEMP}/${archive}" -C "${RUNNER_TEMP}" actionlint
+          "${RUNNER_TEMP}/actionlint" -color
 
       - name: Type-check
         if: inputs.typecheck != ''
@@ -130,10 +174,35 @@ jobs:
             python -m twine check --strict dist/*
           fi
 
+  # The checks job is a matrix, and a matrix job's step outputs are last-writer-wins: a passing
+  # leg that finishes after a failed one would still report "success". needs.checks.result
+  # aggregates every leg, so this job turns it into the checks-result output.
+  matrix-result:
+    needs: checks
+    if: always()
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions: {}
+    outputs:
+      result: ${{ steps.done.outputs.result }}
+    steps:
+      - name: Require every python-versions leg
+        id: done
+        env:
+          RESULT: ${{ needs.checks.result }}
+        run: |
+          test "$RESULT" = success
+          echo "result=success" >> "$GITHUB_OUTPUT"
+
   security:
     runs-on: ubuntu-24.04
     permissions:
       contents: read
+    outputs:
+      result: ${{ steps.done.outputs.result }}
+    defaults:
+      run:
+        working-directory: ${{ inputs.working-directory }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -170,3 +239,7 @@ jobs:
           set -euo pipefail
           python -m pip freeze --exclude-editable > "$RUNNER_TEMP/audit-requirements.txt"
           pip-audit --strict --disable-pip --no-deps -r "$RUNNER_TEMP/audit-requirements.txt"
+
+      - name: Record result
+        id: done
+        run: echo "result=success" >> "$GITHUB_OUTPUT"

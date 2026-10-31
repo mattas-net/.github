@@ -1,0 +1,10 @@
+# Minimal docs fixture for the self-test job in .github/workflows/checks.yml
+# (docs.yml with dry-run: true builds it with `zensical build --clean --strict`).
+[project]
+site_name = "Docs fixture"
+docs_dir = "docs"
+site_dir = "site"
+
+nav = [
+  { "Home" = "index.md" },
+]

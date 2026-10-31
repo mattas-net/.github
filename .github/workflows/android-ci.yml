@@ -10,9 +10,27 @@ name: Android CI (reusable)
 # the checkout (../we-just-might-core, the app's wjm.coreDir default) with the core repo's own
 # composite action, using the WJM_CORE_DEPLOY_KEY secret.
 #
-# The job sets the `check-result` workflow output to "success" when it passes, so a caller
-# whose branch ruleset requires a bare check name (e.g. `check`) can keep a thin job of that
-# name that reads it.
+# Jobs: check (Gradle tests, lint, build) and security (osv-scanner over the repo's lockfiles).
+#
+# Outputs:
+#   checks-result    "success" when the check job passed
+#   security-result  "success" when the security job passed
+#   check-result     same as checks-result; deprecated, kept for one release (removed in WP-2d)
+# Callers end checks.yml with the two alias jobs from STANDARD.md (`<job>` = the caller job
+# that uses this workflow), so rulesets require exactly `checks` and `security`:
+#
+#   checks:
+#     needs: <job>
+#     if: always()   # a skipped required check counts as passing, so always run and assert
+#     runs-on: ubuntu-24.04
+#     timeout-minutes: 5
+#     steps:
+#       - name: Require the shared checks job
+#         env:
+#           RESULT: ${{ needs.<job>.outputs.checks-result }}
+#         run: test "$RESULT" = success
+#   security:
+#     (same, reading needs.<job>.outputs.security-result)
 on:
   workflow_call:
     inputs:
@@ -45,8 +63,14 @@ on:
         description: Read-only deploy key for mattas-net/we-just-might-core (rust-core-ref only).
         required: false
     outputs:
-      check-result:
+      checks-result:
         description: '"success" when the check job passed.'
+        value: ${{ jobs.check.outputs.result }}
+      security-result:
+        description: '"success" when the security job passed.'
+        value: ${{ jobs.security.outputs.result }}
+      check-result:
+        description: '"success" when the check job passed (deprecated: use checks-result).'
         value: ${{ jobs.check.outputs.result }}
 
 permissions:
@@ -124,6 +148,57 @@ jobs:
             **/build/test-results/
           if-no-files-found: ignore
           retention-days: 14
+
+      - name: Record result
+        id: done
+        run: echo "result=success" >> "$GITHUB_OUTPUT"
+
+  # Dependency vulnerabilities: osv-scanner over every lockfile in the repository. It is a
+  # Docker action, so it runs on Linux whatever the platform; it fails on any known
+  # vulnerability (add `--config` with an ignore file only if a repo later needs one).
+  security:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    outputs:
+      result: ${{ steps.done.outputs.result }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.ref }}
+          persist-credentials: false
+
+      # osv-scanner exits 128 ("no packages found") on a repo with nothing to scan; report
+      # that as a warning instead of failing the job.
+      - name: Find lockfiles
+        id: lockfiles
+        shell: bash
+        run: |
+          set -euo pipefail
+          found="$(find . -path ./.git -prune -o -type f \( \
+            -name Package.resolved -o -name '*requirements*.txt' -o -name '*.lockfile' \
+            -o -name verification-metadata.xml -o -name package-lock.json -o -name yarn.lock \
+            -o -name pnpm-lock.yaml -o -name Cargo.lock -o -name poetry.lock -o -name uv.lock \
+            -o -name Pipfile.lock -o -name pdm.lock -o -name pylock.toml -o -name go.mod \
+            -o -name Gemfile.lock -o -name composer.lock -o -name pubspec.lock \
+            \) -print)"
+          if [ -n "$found" ]; then
+            printf 'Lockfiles:\n%s\n' "$found"
+            echo "found=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::warning::No lockfile that osv-scanner reads; nothing to scan."
+            echo "found=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: osv-scanner
+        if: steps.lockfiles.outputs.found == 'true'
+        uses: google/osv-scanner-action/osv-scanner-action@b1d267aea5211fa648d9d442fa64b90dbdcbdd36 # v2.7.0
+        with:
+          scan-args: |
+            --recursive
+            ./
 
       - name: Record result
         id: done

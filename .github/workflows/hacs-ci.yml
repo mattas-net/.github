@@ -2,11 +2,30 @@ name: HACS validation (reusable)
 
 # Validates a Home Assistant custom integration the way HACS and Home Assistant
 # do: hassfest (manifest, translations, services) and the HACS repository
-# action. Tests and lint run separately through python-ci.yml. Callers run this
-# on push to main, on pull requests behind their `approve` gate, and nightly
-# (hassfest tracks the current Home Assistant dev branch).
+# action, and scans its dependencies (osv-scanner). Tests and lint run separately
+# through python-ci.yml. Callers run this on push to main, on pull requests behind
+# their `approve` gate, and nightly (hassfest tracks the current Home Assistant dev
+# branch).
 #
-# Check contexts: `<caller job> / hassfest` and `<caller job> / hacs`.
+# Outputs:
+#   checks-result    "success" when both hassfest and hacs passed
+#   security-result  "success" when the security job passed
+# A HACS caller has two shared jobs (python-ci + hacs-ci); its alias jobs need both and
+# require both results (python's checks-result and this one, likewise for security).
+# Alias job from STANDARD.md (`<job>` = the caller job that uses this workflow):
+#
+#   checks:
+#     needs: <job>
+#     if: always()   # a skipped required check counts as passing, so always run and assert
+#     runs-on: ubuntu-24.04
+#     timeout-minutes: 5
+#     steps:
+#       - name: Require the shared checks job
+#         env:
+#           RESULT: ${{ needs.<job>.outputs.checks-result }}
+#         run: test "$RESULT" = success
+#   security:
+#     (same, reading needs.<job>.outputs.security-result)
 on:
   workflow_call:
     inputs:
@@ -14,6 +33,13 @@ on:
         description: Space-separated HACS checks to skip (e.g. `brands` until the integration is in home-assistant/brands).
         type: string
         default: brands
+    outputs:
+      checks-result:
+        description: '"success" when both hassfest and hacs passed.'
+        value: ${{ jobs.hassfest.outputs.result == 'success' && jobs.hacs.outputs.result == 'success' && 'success' || 'failure' }}
+      security-result:
+        description: '"success" when the security job passed.'
+        value: ${{ jobs.security.outputs.result }}
 
 # Actions are pinned by commit SHA; the comment names the tag each SHA was resolved from.
 jobs:
@@ -21,6 +47,8 @@ jobs:
     runs-on: ubuntu-24.04
     permissions:
       contents: read
+    outputs:
+      result: ${{ steps.done.outputs.result }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -28,14 +56,72 @@ jobs:
           persist-credentials: false
       - name: hassfest
         uses: home-assistant/actions/hassfest@86d4564712fa02543c808e3a693dd04f9d3f8361 # master 2026-10-30 (no release tags)
+      - name: Record result
+        id: done
+        run: echo "result=success" >> "$GITHUB_OUTPUT"
 
   hacs:
     runs-on: ubuntu-24.04
     permissions:
       contents: read
+    outputs:
+      result: ${{ steps.done.outputs.result }}
     steps:
       - name: HACS validation
         uses: hacs/action@d556e736723344f83838d08488c983a15381059a # 22.5.0
         with:
           category: integration
           ignore: ${{ inputs.hacs-ignore }}
+      - name: Record result
+        id: done
+        run: echo "result=success" >> "$GITHUB_OUTPUT"
+
+  # Dependency vulnerabilities: osv-scanner over every lockfile in the repository. It is a
+  # Docker action, so it runs on Linux whatever the platform; it fails on any known
+  # vulnerability (add `--config` with an ignore file only if a repo later needs one).
+  security:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    outputs:
+      result: ${{ steps.done.outputs.result }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # osv-scanner exits 128 ("no packages found") on a repo with nothing to scan; report
+      # that as a warning instead of failing the job.
+      - name: Find lockfiles
+        id: lockfiles
+        shell: bash
+        run: |
+          set -euo pipefail
+          found="$(find . -path ./.git -prune -o -type f \( \
+            -name Package.resolved -o -name '*requirements*.txt' -o -name '*.lockfile' \
+            -o -name verification-metadata.xml -o -name package-lock.json -o -name yarn.lock \
+            -o -name pnpm-lock.yaml -o -name Cargo.lock -o -name poetry.lock -o -name uv.lock \
+            -o -name Pipfile.lock -o -name pdm.lock -o -name pylock.toml -o -name go.mod \
+            -o -name Gemfile.lock -o -name composer.lock -o -name pubspec.lock \
+            \) -print)"
+          if [ -n "$found" ]; then
+            printf 'Lockfiles:\n%s\n' "$found"
+            echo "found=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::warning::No lockfile that osv-scanner reads; nothing to scan."
+            echo "found=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: osv-scanner
+        if: steps.lockfiles.outputs.found == 'true'
+        uses: google/osv-scanner-action/osv-scanner-action@b1d267aea5211fa648d9d442fa64b90dbdcbdd36 # v2.7.0
+        with:
+          scan-args: |
+            --recursive
+            ./
+
+      - name: Record result
+        id: done
+        run: echo "result=success" >> "$GITHUB_OUTPUT"

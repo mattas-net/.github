@@ -1,16 +1,41 @@
 name: Node checks (reusable)
 
-# Lint, typecheck, test and audit a Node project. Each npm script runs only if
-# it exists. Callers run this on push to main (automatic) and on
-# workflow_dispatch (manual, for PR branches). docker-build-push.yml also
-# calls it as its verify job.
+# Lint, typecheck and test a Node project (each npm script runs only if it exists), then
+# audit its dependencies. Callers run this on push to main (automatic) and on pull requests
+# behind their `approve` gate. docker-build-push.yml also calls it as its verify job.
+#
+# Jobs: checks (npm ci, lint, typecheck, test) and security (npm audit of production
+# dependencies; on PRs, dependency review of what the PR introduces).
+#
+# Outputs:
+#   checks-result    "success" when the checks job passed
+#   security-result  "success" when the security job passed
+# Callers end checks.yml with the two alias jobs from STANDARD.md (`<job>` = the caller job
+# that uses this workflow), so rulesets require exactly `checks` and `security`:
+#
+#   checks:
+#     needs: <job>
+#     if: always()   # a skipped required check counts as passing, so always run and assert
+#     runs-on: ubuntu-24.04
+#     timeout-minutes: 5
+#     steps:
+#       - name: Require the shared checks job
+#         env:
+#           RESULT: ${{ needs.<job>.outputs.checks-result }}
+#         run: test "$RESULT" = success
+#   security:
+#     (same, reading needs.<job>.outputs.security-result)
 on:
   workflow_call:
     inputs:
-      node-version:
-        description: Node major (match the Dockerfile base).
+      working-directory:
+        description: Directory holding package.json and package-lock.json, relative to the repo root; every command runs there.
         type: string
-        default: "22"
+        default: .
+      node-version:
+        description: Node major; must equal `.nvmrc` and the Dockerfile `ARG NODE_VERSION`.
+        type: string
+        default: "24"
       npm-ci-args:
         description: Extra flags for npm ci.
         type: string
@@ -19,6 +44,13 @@ on:
         description: Minimum severity that fails npm audit and, on PRs, dependency review (production dependencies only).
         type: string
         default: high
+    outputs:
+      checks-result:
+        description: '"success" when the checks job passed.'
+        value: ${{ jobs.checks.outputs.result }}
+      security-result:
+        description: '"success" when the security job passed.'
+        value: ${{ jobs.security.outputs.result }}
 
 # Actions are pinned by commit SHA; the comment names the tag each SHA was resolved from.
 jobs:
@@ -26,10 +58,14 @@ jobs:
     runs-on: ubuntu-24.04
     permissions:
       contents: read
-
+    outputs:
+      result: ${{ steps.done.outputs.result }}
+    defaults:
+      run:
+        working-directory: ${{ inputs.working-directory }}
     steps:
       - name: Checkout repository
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
@@ -38,6 +74,7 @@ jobs:
         with:
           node-version: ${{ inputs.node-version }}
           cache: npm
+          cache-dependency-path: ${{ inputs.working-directory }}/package-lock.json
 
       - name: Install dependencies
         run: npm ci ${{ inputs.npm-ci-args }}
@@ -51,9 +88,33 @@ jobs:
       - name: Test
         run: npm test --if-present
 
-      # Same model as python-ci.yml: every run audits the whole tree, so a high CVE
-      # on main fails Checks and blocks create-release.yml; a PR also gets dependency
-      # review of what it introduces.
+      - name: Record result
+        id: done
+        run: echo "result=success" >> "$GITHUB_OUTPUT"
+
+  # Same model as python-ci.yml: every run audits the whole tree, so a high CVE on main fails
+  # Checks and blocks create-release.yml; a PR also gets dependency review of what it introduces.
+  # npm audit reads package-lock.json, so no install is needed.
+  security:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    outputs:
+      result: ${{ steps.done.outputs.result }}
+    defaults:
+      run:
+        working-directory: ${{ inputs.working-directory }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Node
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: ${{ inputs.node-version }}
+
       - name: Audit production dependencies
         run: npm audit --omit=dev --audit-level=${{ inputs.audit-level }}
 
@@ -63,3 +124,7 @@ jobs:
         with:
           fail-on-severity: ${{ inputs.audit-level }}
           fail-on-scopes: runtime
+
+      - name: Record result
+        id: done
+        run: echo "result=success" >> "$GITHUB_OUTPUT"

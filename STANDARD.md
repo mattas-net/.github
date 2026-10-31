@@ -320,6 +320,8 @@ Bare semver `X.Y.Z` or `X.Y.Z-suffix`; never a `v` prefix. The manifest that car
      callers skip it because their release workflow re-runs the checks on the tag);
    - tags `main` HEAD and publishes the GitHub Release, marking it a pre-release when the version has a hyphen
      suffix.
+   `dry-run: true` runs every check and the local tag, then prints the push and the release instead of doing
+   them; `notes-file` (a repo path read at the tag) replaces the generated release notes.
 5. The caller then runs the chained job: build and publish (python), image push (service/site), store upload
    (mobile), docs republish.
 
@@ -379,7 +381,7 @@ Node 24 LTS everywhere.
   `FROM node:${NODE_VERSION}-alpine`. Dependabot's `docker` entry then stops proposing base bumps; that is
   intended. Bump `.nvmrc` and the ARG together, by hand.
 - `checks.yml`, `release.yml` and `docker-build-push.yml` pass `node-version: "24"` explicitly (reusable inputs
-  cannot read files). The `node-ci.yml` default is `"24"`.
+  cannot read files). The `node-ci.yml` and `docker-build-push.yml` defaults are `"24"`.
 
 ## Python matrix rule
 
@@ -414,6 +416,15 @@ Confirmed platform behavior:
 3. Live rulesets currently keep each repo's legacy check contexts. They move to `checks` and `security` in WP-1
    pass 2, after each repo's caller migration (WP-3) merges. Requiring `checks`/`security` before a repo's
    `checks.yml` emits them would block every PR.
+
+### This repository
+
+The shared repo has no `checks`/`security` aliases. Its `Checks` workflow runs `actionlint` over
+`.github/workflows` and a `self-test` job that calls `python-ci`, `node-ci`, `rust-ci` and `docs` (`dry-run`)
+from the PR ref against `tests/fixtures/<class>/` (via `working-directory`), so a broken reusable fails here
+before callers pick it up from `@main`. Its default-branch ruleset requires exactly the contexts `actionlint`
+and `self-test`; `self-test` asserts the `checks-result` and `security-result` outputs of each reusable (and the
+`docs` job result) equal `success`.
 
 ## Onboarding a new repo
 
