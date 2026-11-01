@@ -1,11 +1,12 @@
 name: Checks
 
 # Checks for this repository's own workflows: actionlint over .github/workflows, and a
-# self-test that runs python-ci, node-ci, rust-ci, infra-ci, ios-ci, docs (dry run), create-release
+# self-test that runs python-ci, node-ci, rust-ci, infra-ci, docs (dry run), create-release
 # (dry run) and docker-build-push (no push) from this ref against the fixtures under
 # tests/fixtures/<class>/, plus a parse-only check of ios-release and android-release, so a broken
-# reusable fails here before callers pick it up from @main. Not self-tested (see README):
-# android-ci, hacs-ci and python-build (no working-directory input), and the release signing paths. Local `uses: ./...` paths resolve to the commit under test.
+# reusable fails here before callers pick it up from @main. Not self-tested (see README): ios-ci
+# (its unconditional we-just-might-core action cannot be resolved from this repository), android-ci,
+# hacs-ci and python-build (no working-directory input), and the release signing paths. Local `uses: ./...` paths resolve to the commit under test.
 # Runs automatically on push to main; on pull requests the run waits at the `approve` job
 # (no runner minutes) until a required reviewer approves it in the `approval` environment.
 # A manually dispatched run does not attach to a PR, so it cannot satisfy the gate.
@@ -168,52 +169,8 @@ jobs:
             echo "$f: workflow_call block present"
           done
 
-  # macOS minutes are expensive: ios-ci runs only on workflow_dispatch and on pull requests
-  # that change the iOS workflows or fixture (push runs skip it).
-  changes:
-    needs: approve
-    if: always() && needs.approve.result != 'failure' && needs.approve.result != 'cancelled'
-    runs-on: ubuntu-24.04
-    timeout-minutes: 5
-    outputs:
-      ios: ${{ steps.diff.outputs.ios }}
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          fetch-depth: 0
-          persist-credentials: false
-      - name: Detect iOS changes
-        id: diff
-        env:
-          EVENT: ${{ github.event_name }}
-          BASE_REF: ${{ github.base_ref }}
-        run: |
-          set -euo pipefail
-          ios=false
-          if [ "$EVENT" = workflow_dispatch ]; then
-            ios=true
-          elif [ "$EVENT" = pull_request ]; then
-            if git diff --name-only "origin/${BASE_REF}...HEAD" | grep -Eq '^(\.github/workflows/ios-|tests/fixtures/ios/)'; then
-              ios=true
-            fi
-          fi
-          echo "ios=$ios" >> "$GITHUB_OUTPUT"
-          echo "ios-ci self-test: $ios"
-
-  self-test-ios:
-    needs: [approve, changes]
-    if: always() && needs.approve.result != 'failure' && needs.approve.result != 'cancelled' && needs.changes.outputs.ios == 'true'
-    uses: ./.github/workflows/ios-ci.yml
-    permissions:
-      contents: read
-    with:
-      package-path: tests/fixtures/ios
-      lint-dir: tests/fixtures/ios
-      app-scheme: Fixture
-      app-build: false
-
   self-test:
-    needs: [approve, self-test-python, self-test-node, self-test-rust, self-test-docs, self-test-infra, self-test-create-release, self-test-docker, self-test-release-parse, self-test-ios]
+    needs: [approve, self-test-python, self-test-node, self-test-rust, self-test-docs, self-test-infra, self-test-create-release, self-test-docker, self-test-release-parse]
     # always(): a rejected approval or a failed reusable must fail this required check, not skip it.
     if: always()
     runs-on: ubuntu-24.04
@@ -233,9 +190,6 @@ jobs:
           CREATE_RELEASE: ${{ needs.self-test-create-release.result }}
           DOCKER: ${{ needs.self-test-docker.result }}
           RELEASE_PARSE: ${{ needs.self-test-release-parse.result }}
-          IOS: ${{ needs.self-test-ios.result }}
-          IOS_CHECKS: ${{ needs.self-test-ios.outputs.checks-result }}
-          IOS_SECURITY: ${{ needs.self-test-ios.outputs.security-result }}
         run: |
           status=0
           for name in PYTHON_CHECKS PYTHON_SECURITY NODE_CHECKS NODE_SECURITY RUST_CHECKS RUST_SECURITY DOCS INFRA_CHECKS INFRA_SECURITY CREATE_RELEASE DOCKER RELEASE_PARSE; do
@@ -243,15 +197,6 @@ jobs:
             echo "$name=${value:-<empty>}"
             if [ "$value" != success ]; then status=1; fi
           done
-          # ios-ci is gated by the changes job (macOS cost): skipped is fine, otherwise it must pass.
-          echo "IOS=$IOS"
-          if [ "$IOS" != skipped ]; then
-            for name in IOS IOS_CHECKS IOS_SECURITY; do
-              value="${!name}"
-              echo "$name=${value:-<empty>}"
-              if [ "$value" != success ]; then status=1; fi
-            done
-          fi
           exit "$status"
 
   checks:
@@ -272,7 +217,7 @@ jobs:
           test "$SELF_TEST" = success
 
   security:
-    needs: [self-test-python, self-test-node, self-test-rust, self-test-infra, self-test-ios]
+    needs: [self-test-python, self-test-node, self-test-rust, self-test-infra]
     if: always()
     runs-on: ubuntu-24.04
     timeout-minutes: 5
@@ -283,12 +228,8 @@ jobs:
           NODE: ${{ needs.self-test-node.outputs.security-result }}
           RUST: ${{ needs.self-test-rust.outputs.security-result }}
           INFRA: ${{ needs.self-test-infra.outputs.security-result }}
-          IOS_RESULT: ${{ needs.self-test-ios.result }}
-          IOS: ${{ needs.self-test-ios.outputs.security-result }}
         run: |
           test "$PYTHON" = success
           test "$NODE" = success
           test "$RUST" = success
           test "$INFRA" = success
-          # ios-ci is skipped unless iOS files changed (see the changes job)
-          if [ "$IOS_RESULT" != skipped ]; then test "$IOS" = success; fi

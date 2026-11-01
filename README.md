@@ -313,11 +313,11 @@ Self-tested on fixtures:
 | `infra-ci` | `tests/fixtures/infra` (`terraform-dirs`, `helm-dirs`; a shell script) |
 | `create-release` | `dry-run: true`, version `0.0.0`, manifest `tests/fixtures/node/package.json` (read from `main`, so the fixture must exist there; the `0.0.0` tag must not) |
 | `docker-build-push` | `tests/fixtures/docker`, `push: false`, `image-tag: selftest` |
-| `ios-ci` | `tests/fixtures/ios` (SwiftPM package: `swift test` + SwiftLint; no Xcode project). macOS runners, so it runs only on `workflow_dispatch` and on pull requests that change `.github/workflows/ios-*` or `tests/fixtures/ios/**` (a `changes` job decides; a skipped run counts as passing) |
 | `ios-release`, `android-release` | parse only: `yq` asserts the `on.workflow_call` inputs and secrets blocks (plus `actionlint` over every workflow); they need signing secrets |
 
 Not self-tested (gaps):
 
+- `ios-ci`: the job prepare step resolves `mattas-net/we-just-might-core/.github/actions/build-ios@main` even when `rust-core-ref` is empty, and that private repository does not allow actions from this one, so any call from here fails with "Unable to resolve action". Allowing this repository under the core repo's Actions access setting would make a SwiftPM fixture (`swift test` + SwiftLint, macOS runners) viable; gate it to `ios-*` changes.
 - `android-ci`: needs a Gradle project at the repository root (no `working-directory` input).
 - `hacs-ci`: hassfest and the HACS action validate the repository root, which has no `custom_components/`.
 - `python-build`: builds the repository root and requires `ref` to be a published tag equal to the built version.
