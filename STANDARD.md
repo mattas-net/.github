@@ -447,10 +447,12 @@ Confirmed platform behavior:
 
 Its `Checks` workflow ends with the standard `checks` and `security` alias jobs (`checks` asserts `actionlint` and
 `self-test`; `security` asserts the self-test security results) and runs `actionlint` over
-`.github/workflows` and a `self-test` job that calls `python-ci`, `node-ci`, `rust-ci` and `docs` (`dry-run`)
-from the PR ref against `tests/fixtures/<class>/` (via `working-directory`), so a broken reusable fails here
+`.github/workflows` and a `self-test` job that calls `python-ci`, `node-ci`, `rust-ci`, `infra-ci`, `docs`
+(`dry-run`), `create-release` (`dry-run`) and `docker-build-push` (`push: false`) from the PR ref against
+`tests/fixtures/<class>/`, and parses `ios-release` and `android-release` (`on.workflow_call` check only), so a broken reusable fails here
 before callers pick it up from `@main`. The org ruleset requires `checks` and `security`; `self-test` asserts the `checks-result` and `security-result` outputs of each reusable (and the
-`docs` job result) equal `success`.
+`docs`, `create-release` and `docker-build-push` job results) equal `success`.
+Not self-tested: `ios-ci` (it resolves a private we-just-might-core action this repository cannot access), `android-ci` and `hacs-ci` (they validate the repository root and have no `working-directory` input), `python-build` (it needs a published tag equal to the built version), and the signing and store-upload paths of the release workflows (they need secrets).
 
 ## Onboarding a new repo
 
