@@ -90,6 +90,7 @@ Outputs: `tag`, `prerelease`
 | `extra-repository` | string | `""` |  |
 | `extra-path` | string | `""` |  |
 | `extra-ref-file` | string | `""` |  |
+| `push` | boolean | `true` |  |
 
 Secrets: `extra-ssh-key`
 
@@ -270,7 +271,8 @@ Outputs: `checks-result`, `security-result`
   and the release instead of doing them; `notes-file` is a repo path whose copy at the tag becomes the release
   notes (generated notes when absent).
 - `docker-build-push.yml` pushes `ghcr.io/<owner>/<repo>:<tag>` plus `latest` (skipped when the tag contains `-`, i.e. pre-releases; a dispatch rebuild of a stable tag therefore moves `latest` too).
-  `image-tag` pushes exactly that tag from any ref with no `latest`. `extra-repository`, `extra-path`,
+  `image-tag` pushes exactly that tag from any ref with no `latest`. `push: false` builds only: no registry login,
+  nothing pushed, no `latest` (used by the self-test). `extra-repository`, `extra-path`,
   `extra-ref-file` and the `extra-ssh-key` secret check out a second repository (we-just-might-server builds
   against we-just-might-core this way; its caller is shown in the we-just-might-server `release.yml`).
 - `node-ci.yml` jobs: `checks` (lint, typecheck, test, each `--if-present`) and `security` (`npm audit`, dependency
@@ -297,7 +299,26 @@ Outputs: `checks-result`, `security-result`
 ## This repository's checks
 
 `.github/workflows/checks.yml` runs `actionlint` over every workflow here (release binary pinned by version and
-verified against its sha256) and a `self-test` job that calls `python-ci`, `node-ci`, `rust-ci` and `docs` (dry
-run) from the PR ref against `tests/fixtures/`, so a broken reusable fails here before callers pick it up from
-`@main`. Same triggers and `approve` gate as the caller templates. Required checks (org ruleset): `checks` and
-`security`, aliases over `actionlint`, `self-test` and the self-test security results.
+verified against its sha256) and a `self-test` job that calls reusables from the PR ref against `tests/fixtures/`,
+so a broken reusable fails here before callers pick it up from `@main`. Same triggers and `approve` gate as the
+caller templates. Required checks (org ruleset): `checks` and `security`, aliases over `actionlint`, `self-test`
+and the self-test security results.
+
+Self-tested on fixtures:
+
+| Reusable | Fixture / mode |
+|---|---|
+| `python-ci`, `node-ci`, `rust-ci` | `tests/fixtures/<class>/` |
+| `docs` | `tests/fixtures/docs`, `dry-run: true` |
+| `infra-ci` | `tests/fixtures/infra` (`terraform-dirs`, `helm-dirs`; a shell script) |
+| `create-release` | `dry-run: true`, version `0.0.0`, manifest `tests/fixtures/node/package.json` (read from `main`, so the fixture must exist there; the `0.0.0` tag must not) |
+| `docker-build-push` | `tests/fixtures/docker`, `push: false`, `image-tag: selftest` |
+| `ios-release`, `android-release` | parse only: `yq` asserts the `on.workflow_call` inputs and secrets blocks (plus `actionlint` over every workflow); they need signing secrets |
+
+Not self-tested (gaps):
+
+- `ios-ci`: the job prepare step resolves `mattas-net/we-just-might-core/.github/actions/build-ios@main` even when `rust-core-ref` is empty, and that private repository does not allow actions from this one, so any call from here fails with "Unable to resolve action". Allowing this repository under the core repo's Actions access setting would make a SwiftPM fixture (`swift test` + SwiftLint, macOS runners) viable; gate it to `ios-*` changes.
+- `android-ci`: needs a Gradle project at the repository root (no `working-directory` input).
+- `hacs-ci`: hassfest and the HACS action validate the repository root, which has no `custom_components/`.
+- `python-build`: builds the repository root and requires `ref` to be a published tag equal to the built version.
+- The signing, upload and store-submission paths of `ios-release` and `android-release`.

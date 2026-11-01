@@ -1,9 +1,12 @@
 name: Checks
 
 # Checks for this repository's own workflows: actionlint over .github/workflows, and a
-# self-test that runs python-ci, node-ci, rust-ci and docs (dry run) from this ref against
-# the fixtures under tests/fixtures/<class>/, so a broken reusable fails here before callers
-# pick it up from @main. Local `uses: ./...` paths resolve to the commit under test.
+# self-test that runs python-ci, node-ci, rust-ci, infra-ci, docs (dry run), create-release
+# (dry run) and docker-build-push (no push) from this ref against the fixtures under
+# tests/fixtures/<class>/, plus a parse-only check of ios-release and android-release, so a broken
+# reusable fails here before callers pick it up from @main. Not self-tested (see README): ios-ci
+# (its unconditional we-just-might-core action cannot be resolved from this repository), android-ci,
+# hacs-ci and python-build (no working-directory input), and the release signing paths. Local `uses: ./...` paths resolve to the commit under test.
 # Runs automatically on push to main; on pull requests the run waits at the `approve` job
 # (no runner minutes) until a required reviewer approves it in the `approval` environment.
 # A manually dispatched run does not attach to a PR, so it cannot satisfy the gate.
@@ -108,8 +111,66 @@ jobs:
       working-directory: tests/fixtures/docs
       dry-run: true
 
+  self-test-infra:
+    needs: approve
+    if: always() && needs.approve.result != 'failure' && needs.approve.result != 'cancelled'
+    uses: ./.github/workflows/infra-ci.yml
+    permissions:
+      contents: read
+    with:
+      terraform-dirs: tests/fixtures/infra/terraform
+      helm-dirs: tests/fixtures/infra/helm
+
+  # create-release checks out main and reads the manifest from there, so the fixture manifest
+  # must already be on main: tests/fixtures/node/package.json (version 0.0.0, no such tag).
+  self-test-create-release:
+    needs: approve
+    if: always() && needs.approve.result != 'failure' && needs.approve.result != 'cancelled'
+    uses: ./.github/workflows/create-release.yml
+    permissions:
+      contents: write
+      actions: read
+    with:
+      version: 0.0.0
+      manifest: tests/fixtures/node/package.json
+      dry-run: true
+
+  self-test-docker:
+    needs: approve
+    if: always() && needs.approve.result != 'failure' && needs.approve.result != 'cancelled'
+    uses: ./.github/workflows/docker-build-push.yml
+    permissions:
+      contents: read
+      packages: write
+    with:
+      verify: false
+      push: false
+      image-tag: selftest
+      context: tests/fixtures/docker
+      file: tests/fixtures/docker/Dockerfile
+
+  # The signed release workflows need secrets, so they are only parsed: the on.workflow_call
+  # block must exist (actionlint above covers syntax and expressions).
+  self-test-release-parse:
+    needs: approve
+    if: always() && needs.approve.result != 'failure' && needs.approve.result != 'cancelled'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Assert on.workflow_call in ios-release and android-release
+        run: |
+          set -euo pipefail
+          for f in ios-release android-release; do
+            yq -e '.on.workflow_call.inputs' ".github/workflows/${f}.yml" > /dev/null
+            yq -e '.on.workflow_call.secrets' ".github/workflows/${f}.yml" > /dev/null
+            echo "$f: workflow_call block present"
+          done
+
   self-test:
-    needs: [approve, self-test-python, self-test-node, self-test-rust, self-test-docs]
+    needs: [approve, self-test-python, self-test-node, self-test-rust, self-test-docs, self-test-infra, self-test-create-release, self-test-docker, self-test-release-parse]
     # always(): a rejected approval or a failed reusable must fail this required check, not skip it.
     if: always()
     runs-on: ubuntu-24.04
@@ -124,9 +185,14 @@ jobs:
           RUST_CHECKS: ${{ needs.self-test-rust.outputs.checks-result }}
           RUST_SECURITY: ${{ needs.self-test-rust.outputs.security-result }}
           DOCS: ${{ needs.self-test-docs.result }}
+          INFRA_CHECKS: ${{ needs.self-test-infra.outputs.checks-result }}
+          INFRA_SECURITY: ${{ needs.self-test-infra.outputs.security-result }}
+          CREATE_RELEASE: ${{ needs.self-test-create-release.result }}
+          DOCKER: ${{ needs.self-test-docker.result }}
+          RELEASE_PARSE: ${{ needs.self-test-release-parse.result }}
         run: |
           status=0
-          for name in PYTHON_CHECKS PYTHON_SECURITY NODE_CHECKS NODE_SECURITY RUST_CHECKS RUST_SECURITY DOCS; do
+          for name in PYTHON_CHECKS PYTHON_SECURITY NODE_CHECKS NODE_SECURITY RUST_CHECKS RUST_SECURITY DOCS INFRA_CHECKS INFRA_SECURITY CREATE_RELEASE DOCKER RELEASE_PARSE; do
             value="${!name}"
             echo "$name=${value:-<empty>}"
             if [ "$value" != success ]; then status=1; fi
@@ -151,7 +217,7 @@ jobs:
           test "$SELF_TEST" = success
 
   security:
-    needs: [self-test-python, self-test-node, self-test-rust]
+    needs: [self-test-python, self-test-node, self-test-rust, self-test-infra]
     if: always()
     runs-on: ubuntu-24.04
     timeout-minutes: 5
@@ -161,7 +227,9 @@ jobs:
           PYTHON: ${{ needs.self-test-python.outputs.security-result }}
           NODE: ${{ needs.self-test-node.outputs.security-result }}
           RUST: ${{ needs.self-test-rust.outputs.security-result }}
+          INFRA: ${{ needs.self-test-infra.outputs.security-result }}
         run: |
           test "$PYTHON" = success
           test "$NODE" = success
           test "$RUST" = success
+          test "$INFRA" = success
