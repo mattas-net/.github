@@ -1,0 +1,6 @@
+apiVersion: v2
+name: fixture
+description: Self-test chart for mattas-net/.github infra-ci.yml
+type: application
+version: 0.1.0
+appVersion: "0.0.0"

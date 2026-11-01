@@ -10,6 +10,8 @@ name: Build and Push Docker Image (reusable)
 # Otherwise a dispatch from a branch does nothing. `latest` is added unless the
 # tag has a pre-release suffix (1.4.2-beta1). The OCI source label links the
 # package to the repository.
+# `push: false` builds only (no registry login, nothing pushed, no `latest`): the self-test
+# in checks.yml uses it to exercise the build without publishing.
 # Multi-repo builds: `path` places the caller repo under the workspace and
 # `extra-repository` checks out a second (private) repo at `extra-path`, at the
 # ref named on the first line of `extra-ref-file`, with the `extra-ssh-key`
@@ -69,6 +71,10 @@ on:
         description: File (relative to the workspace root, e.g. we-just-might-server/scripts/core-ref) whose first line is the ref/SHA of extra-repository to check out; empty = its default branch.
         type: string
         default: ""
+      push:
+        description: Push the image. false = build only, with no registry login and no `latest` tag.
+        type: boolean
+        default: true
     secrets:
       extra-ssh-key:
         description: Deploy key with read access to extra-repository (needed when it is private).
@@ -108,8 +114,12 @@ jobs:
           REF_INPUT: ${{ inputs.ref }}
           REF_NAME: ${{ github.ref_name }}
           IMAGE_TAG: ${{ inputs.image-tag }}
+          PUSH: ${{ inputs.push }}
         run: |
           set -euo pipefail
+          # A build-only run never reaches a registry, so use a local name: a repository such
+          # as ".github" is not a valid image reference.
+          if [[ "$PUSH" != "true" ]]; then IMAGE="build-only"; fi
           if [[ -n "$IMAGE_TAG" ]]; then
             if [[ ! "$IMAGE_TAG" =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$ ]]; then
               echo "::error::Invalid image-tag '$IMAGE_TAG'"
@@ -127,7 +137,7 @@ jobs:
           tag="${REF_INPUT:-$REF_NAME}"
           echo "ref=$tag" >> "$GITHUB_OUTPUT"
           tags="${IMAGE}:${tag}"
-          if [[ "$tag" != *-* ]]; then
+          if [[ "$tag" != *-* && "$PUSH" == "true" ]]; then
             tags="${tags}"$'\n'"${IMAGE}:latest"
           fi
           {
@@ -184,6 +194,7 @@ jobs:
           driver: docker-container
 
       - name: Log in to GitHub Container Registry
+        if: inputs.push
         uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
         with:
           registry: ${{ env.REGISTRY }}
@@ -203,7 +214,7 @@ jobs:
           context: ${{ inputs.context }}
           file: ${{ inputs.file }}
           platforms: ${{ inputs.platforms }}
-          push: true
+          push: ${{ inputs.push }}
           tags: ${{ steps.vars.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           build-args: ${{ inputs.build-args }}
@@ -214,4 +225,10 @@ jobs:
         env:
           DIGEST: ${{ steps.build.outputs.digest }}
           TAGS: ${{ steps.vars.outputs.tags }}
-        run: printf 'Pushed %s\n%s\n' "$DIGEST" "$TAGS"
+          PUSH: ${{ inputs.push }}
+        run: |
+          if [ "$PUSH" = "true" ]; then
+            printf 'Pushed %s\n%s\n' "$DIGEST" "$TAGS"
+          else
+            printf 'Built without pushing (push: false)\n%s\n' "$TAGS"
+          fi
