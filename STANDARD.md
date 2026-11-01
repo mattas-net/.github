@@ -445,11 +445,11 @@ Confirmed platform behavior:
 
 ### This repository
 
-The shared repo has no `checks`/`security` aliases. Its `Checks` workflow runs `actionlint` over
+Its `Checks` workflow ends with the standard `checks` and `security` alias jobs (`checks` asserts `actionlint` and
+`self-test`; `security` asserts the self-test security results) and runs `actionlint` over
 `.github/workflows` and a `self-test` job that calls `python-ci`, `node-ci`, `rust-ci` and `docs` (`dry-run`)
 from the PR ref against `tests/fixtures/<class>/` (via `working-directory`), so a broken reusable fails here
-before callers pick it up from `@main`. Its default-branch ruleset requires exactly the contexts `actionlint`
-and `self-test`; `self-test` asserts the `checks-result` and `security-result` outputs of each reusable (and the
+before callers pick it up from `@main`. The org ruleset requires `checks` and `security`; `self-test` asserts the `checks-result` and `security-result` outputs of each reusable (and the
 `docs` job result) equal `success`.
 
 ## Onboarding a new repo

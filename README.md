@@ -299,5 +299,5 @@ Outputs: `checks-result`, `security-result`
 `.github/workflows/checks.yml` runs `actionlint` over every workflow here (release binary pinned by version and
 verified against its sha256) and a `self-test` job that calls `python-ci`, `node-ci`, `rust-ci` and `docs` (dry
 run) from the PR ref against `tests/fixtures/`, so a broken reusable fails here before callers pick it up from
-`@main`. Same triggers and `approve` gate as the caller templates. Required checks (default-branch ruleset):
-`actionlint` and `self-test`.
+`@main`. Same triggers and `approve` gate as the caller templates. Required checks (org ruleset): `checks` and
+`security`, aliases over `actionlint`, `self-test` and the self-test security results.
