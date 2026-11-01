@@ -98,7 +98,7 @@ Secrets: `extra-ssh-key`
 | Input | Type | Default | Required |
 |---|---|---|---|
 | `version` | string | `""` |  |
-| `python-version` | string | `3.13` |  |
+| `python-version` | string | `3.14` |  |
 | `install` | string | `python -m pip install --disable-pip-version-check -r requirements-docs.txt` |  |
 | `working-directory` | string | `.` |  |
 | `dry-run` | boolean | `false` |  |
@@ -269,7 +269,7 @@ Outputs: `checks-result`, `security-result`
   `<manifest-key>=` line (default `version`). `dry-run` runs every check and tags locally, then prints the push
   and the release instead of doing them; `notes-file` is a repo path whose copy at the tag becomes the release
   notes (generated notes when absent).
-- `docker-build-push.yml` pushes `ghcr.io/<owner>/<repo>:<tag>` plus `latest` (skipped for pre-releases).
+- `docker-build-push.yml` pushes `ghcr.io/<owner>/<repo>:<tag>` plus `latest` (skipped when the tag contains `-`, i.e. pre-releases; a dispatch rebuild of a stable tag therefore moves `latest` too).
   `image-tag` pushes exactly that tag from any ref with no `latest`. `extra-repository`, `extra-path`,
   `extra-ref-file` and the `extra-ssh-key` secret check out a second repository (we-just-might-server builds
   against we-just-might-core this way; its caller is shown in the we-just-might-server `release.yml`).
