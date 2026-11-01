@@ -7,7 +7,8 @@ name: Checks
 # Runs automatically on push to main; on pull requests the run waits at the `approve` job
 # (no runner minutes) until a required reviewer approves it in the `approval` environment.
 # A manually dispatched run does not attach to a PR, so it cannot satisfy the gate.
-# Required checks (default-branch ruleset): "actionlint" and "self-test".
+# Required checks (org ruleset): "checks" and "security"; the aliases at the bottom assert actionlint, the
+# self-test and the self-test security results.
 on:
   push:
     branches: [main]
@@ -131,3 +132,36 @@ jobs:
             if [ "$value" != success ]; then status=1; fi
           done
           exit "$status"
+
+  checks:
+    needs: [approve, actionlint, self-test]
+    if: always()   # a skipped required check counts as passing, so always run and assert
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Require actionlint and the self-test
+        env:
+          APPROVE: ${{ needs.approve.result }}
+          ACTIONLINT: ${{ needs.actionlint.result }}
+          SELF_TEST: ${{ needs.self-test.result }}
+        run: |
+          # approve is skipped (not failed) on push and dispatch runs
+          if [ "$APPROVE" = failure ] || [ "$APPROVE" = cancelled ]; then exit 1; fi
+          test "$ACTIONLINT" = success
+          test "$SELF_TEST" = success
+
+  security:
+    needs: [self-test-python, self-test-node, self-test-rust]
+    if: always()
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Require the self-test security jobs
+        env:
+          PYTHON: ${{ needs.self-test-python.outputs.security-result }}
+          NODE: ${{ needs.self-test-node.outputs.security-result }}
+          RUST: ${{ needs.self-test-rust.outputs.security-result }}
+        run: |
+          test "$PYTHON" = success
+          test "$NODE" = success
+          test "$RUST" = success

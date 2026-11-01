@@ -62,8 +62,9 @@ which is why the aliases always run and assert.
 - `release.yml`: `workflow_dispatch` with a `version` input only.
 - `docs.yml`: push to `main`, `workflow_dispatch`, and `workflow_call` with a `version` input.
 - `docker-build-push.yml` (rebuild): `workflow_dispatch` only.
-- iOS and Android checks run on macOS or Gradle-heavy runners, so they do not run on push; pull requests wait at
-  `approve`, and `workflow_dispatch` runs them on any branch.
+- iOS and Android checks use the same triggers as every other class: push to `main`, pull requests (which wait at
+  `approve`), and `workflow_dispatch` on any branch. They run on macOS or Gradle-heavy runners, so expect them to
+  cost more minutes than the other classes.
 
 ## Required workflows per class
 
@@ -237,7 +238,7 @@ Every documented repo ends `release.yml` with a job that republishes docs after 
 
 ### `docs.yml`
 
-Every documented repo; only `with:` overrides may differ. `python-version: "3.13"` everywhere.
+Every documented repo; only `with:` overrides may differ. `python-version: "3.14"` everywhere (also the shared default).
 
 ```yaml
 name: Docs
@@ -260,7 +261,7 @@ jobs:
       contents: write # the publish script pushes the gh-pages branch
     with:
       version: ${{ inputs.version }}
-      python-version: "3.13"
+      python-version: "3.14"
 ```
 
 Docs are Zensical + mike, published to the repo's `gh-pages` branch by `scripts/publish_versioned_docs.py`.
@@ -331,24 +332,48 @@ deleted or moved (the tag ruleset forbids it); a bad release is fixed forward wi
 
 ## Deployment
 
-Deploys are manual and cluster credentials stay off GitHub. After a release publishes the image, from
-`mattas-net-infra`:
+Production is Keel on `latest`; cluster credentials stay off GitHub.
+
+1. Dispatch **Release** in the app repository (non-pre-release version, e.g. `1.4.2`).
+2. `docker-build-push` pushes `ghcr.io/<owner>/<repo>:<version>` and `:latest`.
+3. Keel force-polls the registry every 5 minutes (`keel.policy: force`, `trigger: poll`,
+   `pollSchedule: "@every 5m"`, `image.tag: latest`, `pullPolicy: Always`) and rolls the deployment when the
+   `latest` digest changes. Expect production to update within about 5 minutes of the build finishing.
+
+A pre-release (`1.4.2-beta1`) pushes only its own tag and never moves `latest`, so Keel does not touch
+production. That is the only staging path: pull the pre-release tag explicitly where you want to try it. The
+pre-release test is a `-` in the tag name (the image workflow checks the tag string, not GitHub's pre-release
+flag).
+
+**Rollback.** Re-dispatch `docker-build-push.yml` in the app repository with `ref` set to the previous stable
+tag. A dispatch from a stable tag rebuilds that tag from source and pushes `<tag>` and `latest` (the `latest`
+condition is "the tag has no `-`"; dispatching does not skip it, only `image-tag` does), so Keel rolls
+production back within about 5 minutes. The rebuild is not a retag: its digest can differ from the original
+image of that version. If a rebuild is not acceptable, fix forward by publishing a patch release.
+
+**`helm upgrade --set image.tag=<version>` is not a deploy path.** It pins the pod to that tag, and a pinned
+tag is no longer `latest`, so Keel stops seeing the deployment as auto-rolling and the app silently drops out of
+automatic rollout until `image.tag` is set back to `latest`. Use helm only for chart or values changes (in
+`mattas-net-infra`, [`DEPLOY.md`](https://github.com/mattas-net/mattas-net-infra/blob/main/DEPLOY.md)). When
+you do, do not combine `--reuse-values` with a chart whose `values.yaml` gained new keys since the last
+install; `--reuse-values` keeps the old computed values and silently ignores new defaults. Pass the full
+values file (or `--reset-then-reuse-values`) and check `helm get values <release> -n <ns>`.
+
+**How to see what is running.** Compare the pod's image digest with the digest of the version in GHCR:
 
 ```sh
-helm upgrade --install <release> <chart> -n <ns> --set image.tag=<version>
+kubectl -n <ns> get deploy <app> -o jsonpath='{..imageID}'
 ```
 
-Pitfall: do not combine `--reuse-values` with a chart whose `values.yaml` gained new keys since the last
-install; `--reuse-values` keeps the old computed values and silently ignores new defaults. Pass the full values
-file (or `--reset-then-reuse-values`) and `--set image.tag=<version>` explicitly, then check
-`helm get values <release> -n <ns>` and the rollout status.
+The `imageID` ends in `@sha256:<digest>`; it should equal the digest GHCR shows for `<version>` (and for
+`latest`) on the package page.
 
 ## Policy files
 
 | File | `mattas-net` repos | `amattas` repos |
 |---|---|---|
 | LICENSE (MIT) | public repos only | every public repo |
-| SECURITY.md | inherited from this repository's root; do not add per repo | per repo, same text as this repository's [SECURITY.md](SECURITY.md) |
+| SECURITY.md | inherited from this repository's root; do not add per repo | inherited from the public `amattas/.github`; do not add per repo |
 | CODEOWNERS | `.github/CODEOWNERS` with `* @amattas` | same |
 | PR template, issue templates | inherited from this repository | pydmp and aioddp keep theirs; others none |
 | dependabot.yml | standard per class | same |
@@ -356,7 +381,9 @@ file (or `--reset-then-reuse-values`) and `--set image.tag=<version>` explicitly
 
 Community-health files in this repository's root (`SECURITY.md`, `CODE_OF_CONDUCT.md`,
 `PULL_REQUEST_TEMPLATE.md`, `ISSUE_TEMPLATE/`) apply to every `mattas-net` repo that lacks its own. GitHub does
-not inherit them for `amattas` repos, which is why SECURITY.md is copied per repo there.
+not inherit across owners, so the `amattas` repos get the same files from `amattas/.github`, a public
+community-health repository (an owner-level `.github` repo only supplies defaults when it is public). Its
+`SECURITY.md` has the same text as this repository's; per-repo copies in `amattas` repos are removed.
 
 ### Dependabot
 
@@ -389,11 +416,12 @@ Node 24 LTS everywhere.
 - Services (calendar-mcp, homeassistant-mcp, ics-combiner) and HACS integrations (hass-ddp, hass-dmp) test the
   single runtime version they ship on: 3.14.
 - Ruff is the one linter and formatter (`ruff check` plus `ruff format --check`), with mypy and pytest.
-- Docs builds use Python 3.13.
+- Docs builds use Python 3.14 (explicit `python-version: "3.14"` in every `docs.yml`; the shared default is 3.14).
 
 ## Rulesets
 
-Three repository rulesets, as JSON in [`rulesets/`](rulesets/) (apply commands in
+Governance: `mattas-net` repos are governed by organization rulesets; the eight `amattas` repos keep
+repository-level rulesets. Three rulesets, as JSON in [`rulesets/`](rulesets/) (apply commands in
 [`rulesets/README.md`](rulesets/README.md)):
 
 | Ruleset | File | Effect |
@@ -408,22 +436,20 @@ Variants: `protect-main-contentonly.json` (content-only and CI-less repos: no re
 
 Confirmed platform behavior:
 
-1. The `tag_name_pattern` rule is rejected on user-owned (`amattas`) repos. Only `mattas-net` repos can enforce
-   bare-semver tags in the ruleset. `amattas` repos use `protect-release-tags-user.json` and rely on
-   `create-release`'s version check (it refuses anything that is not bare semver before it tags).
+1. The `tag_name_pattern` rule is rejected on user-owned (`amattas`) repos (platform limitation). Only
+   `mattas-net` repos can enforce bare-semver tags in the ruleset. `amattas` repos use
+   `protect-release-tags-user.json`; the tag-name pattern there is enforced by `create-release`, which refuses
+   anything that is not bare semver before it tags.
 2. `Block Invalid Branch Patterns` includes `refs/heads/*` (single level), so two-level names such as
    `dependabot/<ecosystem>/<name>` are not blocked.
-3. Live rulesets currently keep each repo's legacy check contexts. They move to `checks` and `security` in WP-1
-   pass 2, after each repo's caller migration (WP-3) merges. Requiring `checks`/`security` before a repo's
-   `checks.yml` emits them would block every PR.
 
 ### This repository
 
-The shared repo has no `checks`/`security` aliases. Its `Checks` workflow runs `actionlint` over
+Its `Checks` workflow ends with the standard `checks` and `security` alias jobs (`checks` asserts `actionlint` and
+`self-test`; `security` asserts the self-test security results) and runs `actionlint` over
 `.github/workflows` and a `self-test` job that calls `python-ci`, `node-ci`, `rust-ci` and `docs` (`dry-run`)
 from the PR ref against `tests/fixtures/<class>/` (via `working-directory`), so a broken reusable fails here
-before callers pick it up from `@main`. Its default-branch ruleset requires exactly the contexts `actionlint`
-and `self-test`; `self-test` asserts the `checks-result` and `security-result` outputs of each reusable (and the
+before callers pick it up from `@main`. The org ruleset requires `checks` and `security`; `self-test` asserts the `checks-result` and `security-result` outputs of each reusable (and the
 `docs` job result) equal `success`.
 
 ## Onboarding a new repo
