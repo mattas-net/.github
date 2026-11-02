@@ -67,14 +67,20 @@ runs:
         security set-key-partition-list -S apple-tool:,apple: -k "$keychain_password" "$keychain_path" >/dev/null
         security list-keychains -d user -s "$keychain_path" login.keychain-db
 
-        installed_directory="$HOME/Library/MobileDevice/Provisioning Profiles"
-        mkdir -p "$installed_directory"
+        # Xcode 16+ reads ~/Library/Developer/Xcode/UserData/Provisioning Profiles; older tooling
+        # (and the altool/exportArchive paths) read ~/Library/MobileDevice/Provisioning Profiles.
+        # Install every profile under its UUID in both so either lookup finds it.
+        installed_directories=(
+          "$HOME/Library/MobileDevice/Provisioning Profiles"
+          "$HOME/Library/Developer/Xcode/UserData/Provisioning Profiles"
+        )
+        mkdir -p "${installed_directories[@]}"
         tsv="$RUNNER_TEMP/signing-profiles.tsv"
         : > "$tsv"
         installed_paths=""
 
         install_profile() {
-          local encoded="$1" role="$2" profile_path profile_plist uuid name team application_identifier bundle_id installed
+          local encoded="$1" role="$2" profile_path profile_plist uuid name team application_identifier bundle_id installed directory
           profile_path="$(mktemp "$RUNNER_TEMP/profile.XXXXXX")"
           printf '%s' "$encoded" | base64 --decode > "$profile_path"
           test -s "$profile_path"
@@ -84,12 +90,14 @@ runs:
           team="$(/usr/libexec/PlistBuddy -c 'Print :TeamIdentifier:0' /dev/stdin <<< "$profile_plist")"
           application_identifier="$(/usr/libexec/PlistBuddy -c 'Print :Entitlements:application-identifier' /dev/stdin <<< "$profile_plist")"
           bundle_id="${application_identifier#"$team".}"
-          installed="$installed_directory/$uuid.mobileprovision"
-          cp "$profile_path" "$installed"
+          for directory in "${installed_directories[@]}"; do
+            installed="$directory/$uuid.mobileprovision"
+            cp "$profile_path" "$installed"
+            installed_paths="${installed_paths}${installed}"$'\n'
+          done
           rm -f "$profile_path"
           printf '%s\t%s\n' "$bundle_id" "$name" >> "$tsv"
-          installed_paths="${installed_paths}${installed}"$'\n'
-          echo "Installed $role profile '$name' for $bundle_id (team $team)"
+          echo "Installed $role profile '$name' for $bundle_id (team $team) as $uuid.mobileprovision in ${#installed_directories[@]} profile directories"
           if [ "$role" = "main" ]; then
             if [ -n "$EXPECTED_BUNDLE_ID" ] && [ "$bundle_id" != "$EXPECTED_BUNDLE_ID" ]; then
               echo "::error::the provisioning profile signs $bundle_id, expected $EXPECTED_BUNDLE_ID"
