@@ -20,8 +20,11 @@ name: Android Release (reusable)
 #   5. attaches the AAB (and the R8 mapping, when there is one) to the GitHub Release.
 #
 # Secrets (pass with `secrets: inherit`): UPLOAD_KEYSTORE_BASE64, UPLOAD_KEYSTORE_PASSWORD,
-# UPLOAD_KEY_ALIAS, UPLOAD_KEY_PASSWORD, PLAY_SERVICE_ACCOUNT_JSON, plus WJM_CORE_DEPLOY_KEY
-# (rust-core-ref) and GOOGLE_SERVICES_JSON_BASE64 (google-services-json) where used.
+# UPLOAD_KEY_ALIAS, UPLOAD_KEY_PASSWORD, plus WJM_CORE_DEPLOY_KEY (rust-core-ref) and
+# GOOGLE_SERVICES_JSON_BASE64 (google-services-json) where used. PLAY_SERVICE_ACCOUNT_JSON is an
+# environment secret (it lives only in the `environment` input's environment): it is declared
+# optional because `secrets: inherit` cannot see environment secrets at call time, and the
+# google-play job asserts it at runtime.
 on:
   workflow_call:
     inputs:
@@ -111,8 +114,9 @@ on:
         description: Upload key password.
         required: true
       PLAY_SERVICE_ACCOUNT_JSON:
-        description: Google Play service account JSON key (plain text).
-        required: true
+        description: >-
+          Google Play service account JSON key (plain text). Environment secret: declared optional because `secrets: inherit` cannot see environment secrets at call time; asserted at runtime.
+        required: false
       WJM_CORE_DEPLOY_KEY:
         description: Read-only deploy key for mattas-net/we-just-might-core (rust-core-ref only).
         required: false
@@ -155,6 +159,15 @@ jobs:
       contents: write # attach the AAB to the GitHub Release
 
     steps:
+      - name: Require the environment secrets
+        shell: bash
+        env:
+          ENVIRONMENT_NAME: ${{ inputs.environment }}
+          PLAY_SERVICE_ACCOUNT_JSON: ${{ secrets.PLAY_SERVICE_ACCOUNT_JSON }}
+        run: |
+          set -euo pipefail
+          test -n "$PLAY_SERVICE_ACCOUNT_JSON" || { echo "::error::PLAY_SERVICE_ACCOUNT_JSON is not set in the '${ENVIRONMENT_NAME}' environment"; exit 1; }
+
       - name: Derive versionCode and Play track
         id: version
         shell: bash
