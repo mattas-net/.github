@@ -493,7 +493,9 @@ quicken-mac-visualizer, busybar-claude, demo-god.
   permission, Play App Signing is enabled with the upload key in `UPLOAD_KEYSTORE_*`; an app still in draft needs
   `release-status: draft`.
 - Pass secrets with `secrets: inherit`. A secret stored only in the `Deploy` environment is visible to the upload
-  job but not to the CI run before it, so keep `WJM_CORE_DEPLOY_KEY` at repository level.
+  job but not to the CI run before it, so keep `WJM_CORE_DEPLOY_KEY` at repository level. The environment-only
+  secrets (`ASC_KEY_ID`, `ASC_ISSUER_ID`, `ASC_KEY_P8`, `PLAY_SERVICE_ACCOUNT_JSON`) are declared `required: false`
+  in the workflows, because `secrets: inherit` cannot see them at call time; the upload job asserts them at runtime.
 
 | Secret | Used by |
 |---|---|

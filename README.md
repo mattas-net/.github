@@ -57,7 +57,7 @@ Outputs: `checks-result`, `security-result`, `check-result`
 | `ci-flavor` | string | `""` |  |
 | `rust-core-ref` | string | `""` |  |
 
-Secrets: `UPLOAD_KEYSTORE_BASE64` (required), `UPLOAD_KEYSTORE_PASSWORD` (required), `UPLOAD_KEY_ALIAS` (required), `UPLOAD_KEY_PASSWORD` (required), `PLAY_SERVICE_ACCOUNT_JSON` (required), `WJM_CORE_DEPLOY_KEY`, `GOOGLE_SERVICES_JSON_BASE64`
+Secrets: `UPLOAD_KEYSTORE_BASE64` (required), `UPLOAD_KEYSTORE_PASSWORD` (required), `UPLOAD_KEY_ALIAS` (required), `UPLOAD_KEY_PASSWORD` (required), `PLAY_SERVICE_ACCOUNT_JSON` (environment secret, asserted at runtime), `WJM_CORE_DEPLOY_KEY`, `GOOGLE_SERVICES_JSON_BASE64`
 
 ### `create-release.yml`
 
@@ -198,7 +198,7 @@ Outputs: `checks-result`, `security-result`, `test-result`, `lint-result`, `app-
 | `app-test` | boolean | `false` |  |
 | `app-test-args` | string | `""` |  |
 
-Secrets: `DISTRIBUTION_CERT_P12_BASE64` (required), `DISTRIBUTION_CERT_PASSWORD` (required), `PROVISIONING_PROFILE_BASE64` (required), `EXTRA_PROVISIONING_PROFILE_BASE64`, `ASC_KEY_ID` (required), `ASC_ISSUER_ID` (required), `ASC_KEY_P8` (required), `WJM_CORE_DEPLOY_KEY`, `GOOGLE_SERVICE_INFO_PLIST_BASE64`
+Secrets: `DISTRIBUTION_CERT_P12_BASE64` (required), `DISTRIBUTION_CERT_PASSWORD` (required), `PROVISIONING_PROFILE_BASE64` (required), `EXTRA_PROVISIONING_PROFILE_BASE64`, `ASC_KEY_ID`, `ASC_ISSUER_ID`, `ASC_KEY_P8` (environment secrets, asserted at runtime), `WJM_CORE_DEPLOY_KEY`, `GOOGLE_SERVICE_INFO_PLIST_BASE64`
 
 ### `node-ci.yml`
 

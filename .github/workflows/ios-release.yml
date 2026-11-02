@@ -21,9 +21,11 @@ name: iOS Release (reusable)
 #
 # Secrets (pass with `secrets: inherit`): DISTRIBUTION_CERT_P12_BASE64,
 # DISTRIBUTION_CERT_PASSWORD, PROVISIONING_PROFILE_BASE64, optional
-# EXTRA_PROVISIONING_PROFILE_BASE64, ASC_KEY_ID, ASC_ISSUER_ID, ASC_KEY_P8, plus
-# WJM_CORE_DEPLOY_KEY (rust-core-ref) and GOOGLE_SERVICE_INFO_PLIST_BASE64
-# (google-service-info-plist) where used.
+# EXTRA_PROVISIONING_PROFILE_BASE64, plus WJM_CORE_DEPLOY_KEY (rust-core-ref) and
+# GOOGLE_SERVICE_INFO_PLIST_BASE64 (google-service-info-plist) where used. ASC_KEY_ID,
+# ASC_ISSUER_ID and ASC_KEY_P8 are environment secrets (they live only in the `environment`
+# input's environment): they are declared optional because `secrets: inherit` cannot see
+# environment secrets at call time, and the app-store job asserts them at runtime.
 on:
   workflow_call:
     inputs:
@@ -170,14 +172,17 @@ on:
         description: Optional second profile, e.g. for an app extension.
         required: false
       ASC_KEY_ID:
-        description: App Store Connect API key id.
-        required: true
+        description: >-
+          App Store Connect API key id. Environment secret: declared optional because `secrets: inherit` cannot see environment secrets at call time; asserted at runtime.
+        required: false
       ASC_ISSUER_ID:
-        description: App Store Connect API issuer id.
-        required: true
+        description: >-
+          App Store Connect API issuer id. Environment secret: declared optional because `secrets: inherit` cannot see environment secrets at call time; asserted at runtime.
+        required: false
       ASC_KEY_P8:
-        description: App Store Connect API private key (.p8 contents).
-        required: true
+        description: >-
+          App Store Connect API private key (.p8 contents). Environment secret: declared optional because `secrets: inherit` cannot see environment secrets at call time; asserted at runtime.
+        required: false
       WJM_CORE_DEPLOY_KEY:
         description: Read-only deploy key for mattas-net/we-just-might-core (rust-core-ref only).
         required: false
@@ -239,6 +244,19 @@ jobs:
       contents: write # attach the IPA and dSYMs to the GitHub Release
 
     steps:
+      - name: Require the environment secrets
+        shell: bash
+        env:
+          ENVIRONMENT_NAME: ${{ inputs.environment }}
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+          ASC_KEY_P8: ${{ secrets.ASC_KEY_P8 }}
+        run: |
+          set -euo pipefail
+          test -n "$ASC_KEY_ID" || { echo "::error::ASC_KEY_ID is not set in the '${ENVIRONMENT_NAME}' environment"; exit 1; }
+          test -n "$ASC_ISSUER_ID" || { echo "::error::ASC_ISSUER_ID is not set in the '${ENVIRONMENT_NAME}' environment"; exit 1; }
+          test -n "$ASC_KEY_P8" || { echo "::error::ASC_KEY_P8 is not set in the '${ENVIRONMENT_NAME}' environment"; exit 1; }
+
       - name: Derive marketing version and build number
         id: version
         shell: bash
