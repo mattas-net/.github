@@ -3,7 +3,11 @@
 version: 2
 updates:
 - package-ecosystem: github-actions
-  directory: /
+  # Root covers .github/workflows; the glob covers the composite actions in .github/actions/*,
+  # whose pinned action SHAs Dependabot otherwise never sees.
+  directories:
+  - /
+  - /.github/actions/*
   schedule:
     interval: monthly
   cooldown:
