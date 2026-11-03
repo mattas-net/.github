@@ -18,7 +18,7 @@ name: Infra checks (reusable)
 # Outputs:
 #   checks-result    "success" when terraform, helm and shellcheck all passed
 #   security-result  "success" when the security job passed
-# Callers end checks.yml with the two alias jobs from STANDARD.md (`<job>` = the caller job
+# Callers end checks.yml with the two alias jobs from the fleet standard (mattas-net/standards, private; ci-cd/ci-workflows) (`<job>` = the caller job
 # that uses this workflow), so rulesets require exactly `checks` and `security`:
 #
 #   checks:

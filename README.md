@@ -3,7 +3,7 @@
 Shared GitHub Actions workflows, community-health files and ruleset templates for the mattas-net
 organization and the amattas repositories.
 
-**The standard lives in [STANDARD.md](STANDARD.md)**: repo classes, caller templates (`checks.yml`,
+**The fleet standard lives in the private repo mattas-net/standards** (not readable from this public repo): repo classes, caller templates (`checks.yml`,
 `release.yml`, `docs.yml`, `docker-build-push.yml`), check naming, triggers, versions and tags, the release
 and deployment procedure, policy files, Node and Python version rules, rulesets, and the onboarding
 checklist. Ruleset JSON is in [`rulesets/`](rulesets/).
@@ -262,7 +262,7 @@ Outputs: `checks-result`, `security-result`
 - Every CI reusable (`python-ci`, `node-ci`, `hacs-ci`, `ios-ci`, `android-ci`, `rust-ci`, `infra-ci`) exposes
   `checks-result` and `security-result`. Callers end `checks.yml` with two alias jobs named `checks` and
   `security` that assert those outputs equal `success`, so rulesets require exactly those two contexts (alias
-  block: [STANDARD.md](STANDARD.md#check-naming)). `android-ci`'s `check-result` is a deprecated alias of `checks-result`
+  block: fleet standard, mattas-net/standards (private), `docs/ci-cd/ci-workflows.md`). `android-ci`'s `check-result` is a deprecated alias of `checks-result`
   (removed in WP-2d); `ios-ci` also keeps its per-step outputs.
 - `create-release.yml` reads the version by manifest type: `.json` `.version`; `.toml` the first of
   `[project]`, `[package]`, `[tool.poetry]`, `[workspace.package]` that has a `version`; `.yml`/`.yaml` every
@@ -294,7 +294,7 @@ Outputs: `checks-result`, `security-result`
 - There is no shared CodeQL workflow: every repo uses CodeQL default setup in repository settings, limited to
   real source languages.
 - Mobile mechanics (build numbers, signing secrets, store prerequisites) are in
-  [STANDARD.md](STANDARD.md#reference-mobile-release-mechanics).
+  the fleet standard (mattas-net/standards, private), `docs/ci-cd/mobile-release.md`.
 
 ## This repository's checks
 
