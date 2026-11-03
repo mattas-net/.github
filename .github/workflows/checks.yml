@@ -5,8 +5,8 @@ name: Checks
 # (dry run) and docker-build-push (no push) from this ref against the fixtures under
 # tests/fixtures/<class>/, plus a parse-only check of ios-release and android-release, so a broken
 # reusable fails here before callers pick it up from @main. Not self-tested (see README): ios-ci
-# (its unconditional we-just-might-core action cannot be resolved from this repository), android-ci,
-# hacs-ci and python-build (no working-directory input), and the release signing paths. Local `uses: ./...` paths resolve to the commit under test.
+# (no Swift fixture; macOS runners), android-ci, hacs-ci and python-build (no working-directory
+# input), and the release signing paths. Local `uses: ./...` paths resolve to the commit under test.
 # Runs automatically on push to main; on pull requests the run waits at the `approve` job
 # (no runner minutes) until a required reviewer approves it in the `approval` environment.
 # A manually dispatched run does not attach to a PR, so it cannot satisfy the gate.

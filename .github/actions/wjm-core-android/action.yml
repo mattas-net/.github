@@ -1,0 +1,150 @@
+name: Build the WJM Rust core for Android
+description: >
+  Check out mattas-net/we-just-might-core at a pinned commit into the sibling
+  ../we-just-might-core, install its pinned Rust toolchain, the pinned NDK and cargo-ndk, and
+  run scripts/build-android.sh (full). Afterwards the Kotlin bindings,
+  dist/android/wjm-core/src/main/jniLibs and the host target/release/libwjm_ffi.so (loaded by
+  the JVM unit tests through jna.library.path) all exist. Exports WJM_CORE_DIR; the app's
+  gradle.properties default (wjm.coreDir=../we-just-might-core) already points there.
+
+# Called from android-ci.yml / android-release.yml in this repository (rust-core-ref input)
+# as mattas-net/.github/.github/actions/wjm-core-android@main. The app repository pins the
+# core commit (scripts/core-ref); the reusable workflow resolves it and passes the SHA here.
+# The core repository is private, so the checkout needs a read-only deploy key for it
+# (secret WJM_CORE_DEPLOY_KEY); the key is not persisted into the checkout's git config.
+# Interface with the core: rust-toolchain.toml, Cargo.lock and scripts/build-android.sh.
+inputs:
+  ref:
+    description: 40-hex commit SHA of we-just-might-core to build.
+    required: true
+  ssh-key:
+    description: Read-only deploy key for mattas-net/we-just-might-core.
+    required: true
+  cache-target:
+    description: >
+      Restore and save the core's compiled target/ directory. Signed jobs pass "false" so a
+      production bundle never links cached build output; they cache only the cargo registry
+      sources, which cargo verifies against Cargo.lock checksums.
+    required: false
+    default: "true"
+
+runs:
+  using: composite
+  steps:
+    - name: Validate the pinned core commit
+      shell: bash
+      env:
+        PINNED_SHA: ${{ inputs.ref }}
+      run: |
+        set -euo pipefail
+        if ! printf '%s' "$PINNED_SHA" | grep -Eq '^[0-9a-f]{40}$'; then
+          echo "::error::the core ref must be one 40-character lowercase commit SHA (got '$PINNED_SHA')."
+          exit 1
+        fi
+
+    # actions/checkout only writes under $GITHUB_WORKSPACE, so check out into a scratch
+    # directory there and move it to the sibling path Gradle's wjm.coreDir default names.
+    - name: Check out we-just-might-core at the pinned commit
+      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      with:
+        repository: mattas-net/we-just-might-core
+        ref: ${{ inputs.ref }}
+        path: .wjm-core-checkout
+        ssh-key: ${{ inputs.ssh-key }}
+        persist-credentials: false
+
+    - name: Move the core to ../we-just-might-core
+      shell: bash
+      env:
+        PINNED_SHA: ${{ inputs.ref }}
+      run: |
+        set -euo pipefail
+        core="$(cd "$GITHUB_WORKSPACE/.." && pwd)/we-just-might-core"
+        rm -rf "$core"
+        mv "$GITHUB_WORKSPACE/.wjm-core-checkout" "$core"
+        test "$(git -C "$core" rev-parse HEAD)" = "$PINNED_SHA"
+        echo "WJM_CORE_DIR=$core" >> "$GITHUB_ENV"
+
+    - name: Install the Android NDK
+      uses: android-actions/setup-android@be39fa834029ff78f1a44aa3bb0819b8fc2bd8fd # v4.0.4
+      with:
+        packages: ndk;29.0.14206865
+        log-accepted-android-sdk-licenses: false
+
+    - name: Point the build at the NDK
+      shell: bash
+      run: |
+        set -euo pipefail
+        ndk_home="$ANDROID_HOME/ndk/29.0.14206865"
+        test -x "$ndk_home/ndk-build"
+        echo "ANDROID_NDK_HOME=$ndk_home" >> "$GITHUB_ENV"
+
+    # rust-toolchain.toml names the channel, components, and every target (including the
+    # Android ones), so one `rustup toolchain install` in the core installs the pinned set.
+    - name: Install the pinned Rust toolchain
+      shell: bash
+      run: |
+        set -euo pipefail
+        cd "$WJM_CORE_DIR"
+        rustup toolchain install
+        rustup show active-toolchain
+
+    # hashFiles() only sees files under $GITHUB_WORKSPACE, so key the caches on a digest
+    # computed here.
+    - name: Key the cargo caches on Cargo.lock and rust-toolchain.toml
+      id: key
+      shell: bash
+      run: |
+        set -euo pipefail
+        digest="$(cd "$WJM_CORE_DIR" && cat Cargo.lock rust-toolchain.toml | sha256sum | cut -c1-64)"
+        echo "digest=$digest" >> "$GITHUB_OUTPUT"
+
+    - name: Cache cargo registry and core build output
+      if: ${{ inputs.cache-target == 'true' }}
+      uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+      with:
+        path: |
+          ~/.cargo/registry/index
+          ~/.cargo/registry/cache
+          ~/.cargo/git/db
+          ${{ github.workspace }}/../we-just-might-core/target
+        key: wjm-core-android-${{ runner.os }}-${{ steps.key.outputs.digest }}-${{ inputs.ref }}
+        restore-keys: |
+          wjm-core-android-${{ runner.os }}-${{ steps.key.outputs.digest }}-
+
+    - name: Cache cargo registry sources only
+      if: ${{ inputs.cache-target != 'true' }}
+      uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+      with:
+        path: |
+          ~/.cargo/registry/index
+          ~/.cargo/registry/cache
+          ~/.cargo/git/db
+        key: wjm-core-registry-${{ runner.os }}-${{ steps.key.outputs.digest }}
+
+    # Never cached as a binary: cargo-ndk is always the locked build of the pinned release.
+    - name: Install cargo-ndk (pinned, locked)
+      shell: bash
+      run: |
+        set -euo pipefail
+        cargo install cargo-ndk --version 4.1.2 --locked
+        cargo ndk --version
+
+    - name: Build the core for Android
+      shell: bash
+      run: |
+        set -euo pipefail
+        # Keep build-android.sh's per-tool logs where the failure upload below can reach them.
+        trap 'mkdir -p "$RUNNER_TEMP/wjm-core-logs"; cp -R "$WJM_CORE_DIR/target/android-build/logs/." "$RUNNER_TEMP/wjm-core-logs/" 2>/dev/null || true' EXIT
+        cd "$WJM_CORE_DIR"
+        scripts/build-android.sh
+        test -f target/release/libwjm_ffi.so
+
+    - name: Upload core build logs on failure
+      if: ${{ failure() }}
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+      with:
+        name: wjm-core-build-logs-${{ github.job }}
+        path: ${{ runner.temp }}/wjm-core-logs
+        if-no-files-found: ignore
+        retention-days: 7

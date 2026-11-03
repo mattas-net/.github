@@ -7,8 +7,8 @@ name: Android CI (reusable)
 # gradle-tasks defaults to test<Flavor>DebugUnitTest lint<Flavor>Debug assemble<Flavor>Debug
 # for the given flavor (no flavor: testDebugUnitTest lintDebug assembleDebug).
 # rust-core-ref is for the We Just Might app: it builds mattas-net/we-just-might-core next to
-# the checkout (../we-just-might-core, the app's wjm.coreDir default) with the core repo's own
-# composite action, using the WJM_CORE_DEPLOY_KEY secret.
+# the checkout (../we-just-might-core, the app's wjm.coreDir default) with this repository's
+# .github/actions/wjm-core-android composite action, using the WJM_CORE_DEPLOY_KEY secret.
 #
 # Jobs: check (Gradle tests, lint, build) and security (osv-scanner over the repo's lockfiles).
 #
@@ -112,7 +112,7 @@ jobs:
 
       - name: Build the Rust core
         if: inputs.rust-core-ref != ''
-        uses: mattas-net/we-just-might-core/.github/actions/build-android@main
+        uses: mattas-net/.github/.github/actions/wjm-core-android@main
         with:
           ref: ${{ steps.core.outputs.sha }}
           ssh-key: ${{ secrets.WJM_CORE_DEPLOY_KEY }}

@@ -293,6 +293,11 @@ Outputs: `checks-result`, `security-result`
   it to exercise each reusable on `tests/fixtures/<class>/`.
 - There is no shared CodeQL workflow: every repo uses CodeQL default setup in repository settings, limited to
   real source languages.
+- `rust-core-ref` (`ios-ci`, `ios-release`, `android-ci`, `android-release`) builds the private
+  mattas-net/we-just-might-core with this repository's composite actions `.github/actions/wjm-core-ios` and
+  `.github/actions/wjm-core-android`: they check out the pinned core SHA with the `WJM_CORE_DEPLOY_KEY` deploy
+  key into `../we-just-might-core` and run its `scripts/build-ios.sh` / `scripts/build-android.sh`, so the
+  core only has to keep those scripts and `rust-toolchain.toml` working.
 - Mobile mechanics (build numbers, signing secrets, store prerequisites) are in
   the fleet standard (mattas-net/standards, private), `docs/ci-cd/mobile-release.md`.
 
@@ -317,7 +322,10 @@ Self-tested on fixtures:
 
 Not self-tested (gaps):
 
-- `ios-ci`: the job prepare step resolves `mattas-net/we-just-might-core/.github/actions/build-ios@main` even when `rust-core-ref` is empty, and that private repository does not allow actions from this one, so any call from here fails with "Unable to resolve action". Allowing this repository under the core repo's Actions access setting would make a SwiftPM fixture (`swift test` + SwiftLint, macOS runners) viable; gate it to `ios-*` changes.
+- `ios-ci`: no Swift fixture under `tests/fixtures/`, and every job runs on macOS runners. The core build step
+  (`.github/actions/wjm-core-ios`, only when `rust-core-ref` is set) now lives in this repository, so it no
+  longer blocks a call from here; a SwiftPM fixture (`swift test` + SwiftLint) gated to `ios-*` changes would
+  close the gap.
 - `android-ci`: needs a Gradle project at the repository root (no `working-directory` input).
 - `hacs-ci`: hassfest and the HACS action validate the repository root, which has no `custom_components/`.
 - `python-build`: builds the repository root and requires `ref` to be a published tag equal to the built version.

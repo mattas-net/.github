@@ -38,7 +38,8 @@ name: Apple CI (reusable)
 # The XcodeGen project (project-dir/project.yml) is generated on the runner; a repo with a
 # checked-in .xcodeproj sets xcodegen: false. rust-core-ref is for the We Just Might apps:
 # it builds mattas-net/we-just-might-core next to the checkout (../we-just-might-core) with
-# the core repo's own composite action, using the WJM_CORE_DEPLOY_KEY secret.
+# this repository's .github/actions/wjm-core-ios composite action, using the
+# WJM_CORE_DEPLOY_KEY secret.
 on:
   workflow_call:
     inputs:
@@ -295,7 +296,7 @@ jobs:
 
       - name: Build the Rust core
         if: inputs.rust-core-ref != ''
-        uses: mattas-net/we-just-might-core/.github/actions/build-ios@main
+        uses: mattas-net/.github/.github/actions/wjm-core-ios@main
         with:
           ref: ${{ steps.core.outputs.sha }}
           ssh-key: ${{ secrets.WJM_CORE_DEPLOY_KEY }}
@@ -474,7 +475,7 @@ jobs:
 
       - name: Build the Rust core
         if: inputs.rust-core-ref != ''
-        uses: mattas-net/we-just-might-core/.github/actions/build-ios@main
+        uses: mattas-net/.github/.github/actions/wjm-core-ios@main
         with:
           ref: ${{ steps.core.outputs.sha }}
           ssh-key: ${{ secrets.WJM_CORE_DEPLOY_KEY }}
@@ -650,7 +651,7 @@ jobs:
 
       - name: Build the Rust core
         if: inputs.rust-core-ref != ''
-        uses: mattas-net/we-just-might-core/.github/actions/build-ios@main
+        uses: mattas-net/.github/.github/actions/wjm-core-ios@main
         with:
           ref: ${{ steps.core.outputs.sha }}
           ssh-key: ${{ secrets.WJM_CORE_DEPLOY_KEY }}
@@ -883,7 +884,7 @@ jobs:
       # Signed: no cached core build output in the archive.
       - name: Build the Rust core
         if: inputs.rust-core-ref != ''
-        uses: mattas-net/we-just-might-core/.github/actions/build-ios@main
+        uses: mattas-net/.github/.github/actions/wjm-core-ios@main
         with:
           ref: ${{ steps.core.outputs.sha }}
           ssh-key: ${{ secrets.WJM_CORE_DEPLOY_KEY }}
