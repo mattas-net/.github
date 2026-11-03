@@ -1,0 +1,47 @@
+name: Fuzz batch (reusable)
+
+# Deep ClusterFuzzLite run: batch mode over every target in the caller's .clusterfuzzlite/
+# (project.yaml, Dockerfile, build.sh), built with AddressSanitizer. Callers dispatch it from a
+# `fuzz.yml` (name "Fuzz", on: workflow_dispatch only); the PR-time run is the `fuzz` input of
+# rust-ci / python-ci. A crash fails the run and uploads the crash input as a workflow artifact;
+# findings are filed by hand (fleet standard, mattas-net/standards (private), ci-cd/security-scanning).
+# The actions clone the repository themselves with github-token, so there is no checkout step.
+# No SARIF upload, so the job needs only contents: read.
+on:
+  workflow_call:
+    inputs:
+      language:
+        description: ClusterFuzzLite language of the targets (rust or python; must match .clusterfuzzlite/project.yaml).
+        type: string
+        required: true
+      fuzz-seconds:
+        description: ClusterFuzzLite fuzz-seconds (its total budget, split across the targets).
+        type: number
+        default: 3600
+
+permissions:
+  contents: read
+
+# Actions are pinned by commit SHA; the comment names the tag each SHA was resolved from.
+jobs:
+  fuzz:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    permissions:
+      contents: read
+    steps:
+      - name: Build fuzzers (address)
+        uses: google/clusterfuzzlite/actions/build_fuzzers@884713a6c30a92e5e8544c39945cd7cb630abcd1 # v1
+        with:
+          language: ${{ inputs.language }}
+          sanitizer: address
+          github-token: ${{ github.token }}
+
+      - name: Run fuzzers (batch)
+        uses: google/clusterfuzzlite/actions/run_fuzzers@884713a6c30a92e5e8544c39945cd7cb630abcd1 # v1
+        with:
+          language: ${{ inputs.language }}
+          sanitizer: address
+          mode: batch
+          fuzz-seconds: ${{ inputs.fuzz-seconds }}
+          github-token: ${{ github.token }}

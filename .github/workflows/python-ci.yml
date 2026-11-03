@@ -8,7 +8,9 @@ name: Python checks (reusable)
 # Outputs:
 #   checks-result    "success" when every python-versions leg of the checks job passed
 #                    (aggregated by the matrix-result job)
-#   security-result  "success" when the security job passed
+#   security-result  "success" when the security job passed, and fuzz too when it is enabled
+#                    (fuzz: ClusterFuzzLite over the caller's .clusterfuzzlite/ atheris targets,
+#                    code-change mode, only when the `fuzz` input is true)
 # Callers end checks.yml with the two alias jobs from the fleet standard (mattas-net/standards, private; ci-cd/ci-workflows) (`<job>` = the caller job
 # that uses this workflow), so rulesets require exactly `checks` and `security` and a
 # python-versions change never invalidates a ruleset:
@@ -86,13 +88,24 @@ on:
         default: |
           **/pyproject.toml
           **/requirements*.txt
+      fuzz:
+        description: Run the caller's ClusterFuzzLite targets (.clusterfuzzlite/) in code-change mode; a crash fails security-result.
+        type: boolean
+        default: false
+      fuzz-seconds:
+        description: ClusterFuzzLite fuzz-seconds when fuzz is true (its total budget, split across the targets it runs).
+        type: number
+        default: 600
     outputs:
       checks-result:
         description: '"success" when every python-versions leg of the checks job passed.'
         value: ${{ jobs.matrix-result.outputs.result }}
       security-result:
-        description: '"success" when the security job passed.'
-        value: ${{ jobs.security.outputs.result }}
+        description: '"success" when the security job passed, and fuzz too when it is enabled.'
+        value: >-
+          ${{ jobs.security.outputs.result == 'success'
+          && (!inputs.fuzz || jobs.fuzz.outputs.result == 'success')
+          && 'success' || 'failure' }}
 
 # Actions are pinned by commit SHA; the comment names the tag each SHA was resolved from.
 jobs:
@@ -239,6 +252,39 @@ jobs:
           set -euo pipefail
           python -m pip freeze --exclude-editable > "$RUNNER_TEMP/audit-requirements.txt"
           pip-audit --strict --disable-pip --no-deps -r "$RUNNER_TEMP/audit-requirements.txt"
+
+      - name: Record result
+        id: done
+        run: echo "result=success" >> "$GITHUB_OUTPUT"
+
+  # ClusterFuzzLite against the caller's .clusterfuzzlite/ (project.yaml, Dockerfile, build.sh).
+  # The actions clone the repository themselves with github-token (no checkout step) and diff
+  # against the PR base (or the push's `before`) for code-change mode. No SARIF upload, so the
+  # job needs only contents: read; crash inputs are uploaded as workflow artifacts.
+  fuzz:
+    if: inputs.fuzz
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    permissions:
+      contents: read
+    outputs:
+      result: ${{ steps.done.outputs.result }}
+    steps:
+      - name: Build fuzzers (address)
+        uses: google/clusterfuzzlite/actions/build_fuzzers@884713a6c30a92e5e8544c39945cd7cb630abcd1 # v1
+        with:
+          language: python
+          sanitizer: address
+          github-token: ${{ github.token }}
+
+      - name: Run fuzzers (code-change)
+        uses: google/clusterfuzzlite/actions/run_fuzzers@884713a6c30a92e5e8544c39945cd7cb630abcd1 # v1
+        with:
+          language: python
+          sanitizer: address
+          mode: code-change
+          fuzz-seconds: ${{ inputs.fuzz-seconds }}
+          github-token: ${{ github.token }}
 
       - name: Record result
         id: done

@@ -104,6 +104,13 @@ Secrets: `extra-ssh-key`
 | `working-directory` | string | `.` |  |
 | `dry-run` | boolean | `false` |  |
 
+### `fuzz-batch.yml`
+
+| Input | Type | Default | Required |
+|---|---|---|---|
+| `language` | string |  | yes |
+| `fuzz-seconds` | number | `3600` |  |
+
 ### `hacs-ci.yml`
 
 | Input | Type | Default | Required |
@@ -240,6 +247,8 @@ Outputs: `checks-result`, `security-result`
 | `cache-dependency-path` | string | `**/pyproject.toml
 **/requirements*.txt
 ` |  |
+| `fuzz` | boolean | `false` |  |
+| `fuzz-seconds` | number | `600` |  |
 
 Outputs: `checks-result`, `security-result`
 
@@ -254,6 +263,8 @@ Outputs: `checks-result`, `security-result`
 | `extra-checks` | string | `""` |  |
 | `macos` | boolean | `false` |  |
 | `macos-commands` | string | `cargo test --locked` |  |
+| `fuzz` | boolean | `false` |  |
+| `fuzz-seconds` | number | `600` |  |
 
 Outputs: `checks-result`, `security-result`
 
@@ -281,6 +292,19 @@ Outputs: `checks-result`, `security-result`
   (dependency review on PRs, `pip-audit`) and `matrix-result`, which turns the matrix result into
   `checks-result`. `audit` is `strict`, `warn` or `off`.
 - `rust-ci.yml` jobs: `checks` (fmt, clippy `-D warnings`, test), optional `macos`, and `security` (cargo-deny).
+- Fuzzing (`fuzz: true` on `python-ci` / `rust-ci`) adds a `fuzz` job: ClusterFuzzLite
+  (`google/clusterfuzzlite/actions/build_fuzzers` and `run_fuzzers`, SHA-pinned) builds the caller's
+  `.clusterfuzzlite/` targets with AddressSanitizer and fuzzes them in `code-change` mode for `fuzz-seconds`.
+  `security-result` is `success` only when `security` passed and, with `fuzz` on, `fuzz` passed too; with
+  `fuzz` off the job is skipped and does not affect it, so no new required check. `fuzz-seconds` is
+  ClusterFuzzLite's total budget, which it splits across the targets it runs. The actions clone the repo
+  themselves with `github.token` (no checkout step); there is no SARIF upload, so the job needs only
+  `contents: read`, and crash inputs are uploaded as workflow artifacts.
+- `fuzz-batch.yml` is the deep run: the same build, `batch` mode, `fuzz-seconds` default `3600`, `language`
+  `rust` or `python` (must match `.clusterfuzzlite/project.yaml`). Callers dispatch it from a `fuzz.yml`
+  named `Fuzz` (`on: workflow_dispatch` only). ClusterFuzzLite finds earlier runs' corpus and build artifacts
+  through the Actions artifacts API, which needs `actions: read`; with `contents: read` only, that lookup
+  fails (logged, not fatal) and each run starts from the seed corpus in the build.
   `infra-ci.yml` jobs: `terraform`, `helm`, `shellcheck` and `security` (trivy config); the tools are pinned,
   sha256-verified binaries.
 - `python-build.yml` builds the sdist and wheel, runs `twine check --strict` and fails unless the wheel version
@@ -330,3 +354,5 @@ Not self-tested (gaps):
 - `hacs-ci`: hassfest and the HACS action validate the repository root, which has no `custom_components/`.
 - `python-build`: builds the repository root and requires `ref` to be a published tag equal to the built version.
 - The signing, upload and store-submission paths of `ios-release` and `android-release`.
+- The `fuzz` job of `python-ci` / `rust-ci` and `fuzz-batch`: the fixtures have no `.clusterfuzzlite/`, so the
+  self-test runs with `fuzz` off (the job is skipped).

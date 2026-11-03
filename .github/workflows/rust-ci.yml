@@ -8,12 +8,14 @@ name: Rust checks (reusable)
 #   macos     macos true (macos-26)   `macos-commands`, e.g. the Apple-target checks of a crate with iOS bindings
 #   security  always (ubuntu-24.04)   cargo-deny: `check` (all of deny.toml) when deny.toml exists,
 #                                     else `check advisories` (the RustSec database, as cargo audit)
+#   fuzz      fuzz true (ubuntu-24.04)  ClusterFuzzLite: builds the caller's .clusterfuzzlite/ targets with
+#                                     ASan and fuzzes them in code-change mode for `fuzz-seconds`
 # The toolchain is rust-toolchain.toml (or rust-toolchain) when the project has one, else the
 # `toolchain` input; rustfmt and clippy are always added.
 #
 # Outputs:
 #   checks-result    "success" when checks passed, and macos too when it is enabled
-#   security-result  "success" when the security job passed
+#   security-result  "success" when the security job passed, and fuzz too when it is enabled
 # Callers end checks.yml with the two alias jobs from the fleet standard (mattas-net/standards, private; ci-cd/ci-workflows) (`<job>` = the caller job
 # that uses this workflow), so rulesets require exactly `checks` and `security`:
 #
@@ -60,6 +62,14 @@ on:
         description: Shell run on macos-26 when macos is true, after the toolchain is installed.
         type: string
         default: cargo test --locked
+      fuzz:
+        description: Run the caller's ClusterFuzzLite targets (.clusterfuzzlite/) in code-change mode; a crash fails security-result.
+        type: boolean
+        default: false
+      fuzz-seconds:
+        description: ClusterFuzzLite fuzz-seconds when fuzz is true (its total budget, split across the targets it runs).
+        type: number
+        default: 600
     outputs:
       checks-result:
         description: '"success" when checks passed, and macos too when it is enabled.'
@@ -68,8 +78,11 @@ on:
           && (!inputs.macos || jobs.macos.outputs.result == 'success')
           && 'success' || 'failure' }}
       security-result:
-        description: '"success" when the security job passed.'
-        value: ${{ jobs.security.outputs.result }}
+        description: '"success" when the security job passed, and fuzz too when it is enabled.'
+        value: >-
+          ${{ jobs.security.outputs.result == 'success'
+          && (!inputs.fuzz || jobs.fuzz.outputs.result == 'success')
+          && 'success' || 'failure' }}
 
 permissions:
   contents: read
@@ -238,6 +251,39 @@ jobs:
             echo "No deny.toml: checking advisories only"
             cargo deny --locked check advisories
           fi
+
+      - name: Record result
+        id: done
+        run: echo "result=success" >> "$GITHUB_OUTPUT"
+
+  # ClusterFuzzLite against the caller's .clusterfuzzlite/ (project.yaml, Dockerfile, build.sh).
+  # The actions clone the repository themselves with github-token (no checkout step) and diff
+  # against the PR base (or the push's `before`) for code-change mode. No SARIF upload, so the
+  # job needs only contents: read; crash inputs are uploaded as workflow artifacts.
+  fuzz:
+    if: inputs.fuzz
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    permissions:
+      contents: read
+    outputs:
+      result: ${{ steps.done.outputs.result }}
+    steps:
+      - name: Build fuzzers (address)
+        uses: google/clusterfuzzlite/actions/build_fuzzers@884713a6c30a92e5e8544c39945cd7cb630abcd1 # v1
+        with:
+          language: rust
+          sanitizer: address
+          github-token: ${{ github.token }}
+
+      - name: Run fuzzers (code-change)
+        uses: google/clusterfuzzlite/actions/run_fuzzers@884713a6c30a92e5e8544c39945cd7cb630abcd1 # v1
+        with:
+          language: rust
+          sanitizer: address
+          mode: code-change
+          fuzz-seconds: ${{ inputs.fuzz-seconds }}
+          github-token: ${{ github.token }}
 
       - name: Record result
         id: done
