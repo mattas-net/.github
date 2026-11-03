@@ -1,0 +1,138 @@
+name: Build the WJM Rust core for iOS
+description: >
+  Check out mattas-net/we-just-might-core at a pinned commit into the sibling
+  ../we-just-might-core, install its pinned Rust toolchain, and run scripts/build-ios.sh so
+  the SwiftPM path dependency ../we-just-might-core/dist/ios/WeJustMightCore exists before
+  any Swift command runs. Exports WJM_CORE_DIR.
+
+# Called from ios-ci.yml / ios-release.yml in this repository (rust-core-ref input) as
+# mattas-net/.github/.github/actions/wjm-core-ios@main. The app repository pins the core
+# commit (scripts/core-ref); the reusable workflow resolves it and passes the SHA here. The
+# core repository is private, so the checkout needs a read-only deploy key for it (secret
+# WJM_CORE_DEPLOY_KEY); the key is not persisted into the checkout's git config.
+# Interface with the core: rust-toolchain.toml, Cargo.lock and scripts/build-ios.sh.
+inputs:
+  ref:
+    description: 40-hex commit SHA of we-just-might-core to build.
+    required: true
+  ssh-key:
+    description: Read-only deploy key for mattas-net/we-just-might-core.
+    required: true
+  cache-target:
+    description: >
+      Restore and save the core's compiled target/ directory. Signed jobs pass "false" so a
+      production or signed archive never links cached build output; they cache only the
+      cargo registry sources, which cargo verifies against Cargo.lock checksums.
+    required: false
+    default: "true"
+
+runs:
+  using: composite
+  steps:
+    - name: Validate the pinned core commit
+      shell: bash
+      env:
+        PINNED_SHA: ${{ inputs.ref }}
+      run: |
+        set -euo pipefail
+        if ! printf '%s' "$PINNED_SHA" | grep -Eq '^[0-9a-f]{40}$'; then
+          echo "::error::the core ref must be one 40-character lowercase commit SHA (got '$PINNED_SHA')."
+          exit 1
+        fi
+
+    # actions/checkout only writes under $GITHUB_WORKSPACE, so check out into a scratch
+    # directory there and move it to the sibling path the package manifest names.
+    - name: Check out we-just-might-core at the pinned commit
+      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      with:
+        repository: mattas-net/we-just-might-core
+        ref: ${{ inputs.ref }}
+        path: .wjm-core-checkout
+        ssh-key: ${{ inputs.ssh-key }}
+        persist-credentials: false
+
+    - name: Move the core to ../we-just-might-core
+      shell: bash
+      env:
+        PINNED_SHA: ${{ inputs.ref }}
+      run: |
+        set -euo pipefail
+        core="$(cd "$GITHUB_WORKSPACE/.." && pwd)/we-just-might-core"
+        rm -rf "$core"
+        mv "$GITHUB_WORKSPACE/.wjm-core-checkout" "$core"
+        test "$(git -C "$core" rev-parse HEAD)" = "$PINNED_SHA"
+        echo "WJM_CORE_DIR=$core" >> "$GITHUB_ENV"
+
+    # rust-toolchain.toml names the channel, components, and every mobile target, so one
+    # `rustup toolchain install` in the core directory installs exactly the pinned set.
+    - name: Install rustup and the pinned Rust toolchain
+      shell: bash
+      run: |
+        set -euo pipefail
+        if ! command -v rustup >/dev/null 2>&1; then
+          brew install rustup
+          echo "$(brew --prefix rustup)/bin" >> "$GITHUB_PATH"
+          export PATH="$(brew --prefix rustup)/bin:$PATH"
+        fi
+        cd "$WJM_CORE_DIR"
+        rustup toolchain install
+        rustup show active-toolchain
+        installed="$(rustup target list --installed)"
+        for target in aarch64-apple-ios aarch64-apple-ios-sim x86_64-apple-ios aarch64-apple-darwin x86_64-apple-darwin; do
+          if ! printf '%s\n' "$installed" | grep -qx "$target"; then
+            echo "::error::the pinned toolchain is missing the $target target" >&2
+            exit 1
+          fi
+        done
+
+    # hashFiles() only sees files under $GITHUB_WORKSPACE, so key the caches on a digest
+    # computed here.
+    - name: Key the cargo caches on Cargo.lock and rust-toolchain.toml
+      id: key
+      shell: bash
+      run: |
+        set -euo pipefail
+        digest="$(cd "$WJM_CORE_DIR" && cat Cargo.lock rust-toolchain.toml | shasum -a 256 | cut -c1-64)"
+        echo "digest=$digest" >> "$GITHUB_OUTPUT"
+
+    - name: Cache cargo registry and core build output
+      if: ${{ inputs.cache-target == 'true' }}
+      uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+      with:
+        path: |
+          ~/.cargo/registry/index
+          ~/.cargo/registry/cache
+          ~/.cargo/git/db
+          ${{ github.workspace }}/../we-just-might-core/target
+        key: wjm-core-ios-${{ runner.os }}-${{ steps.key.outputs.digest }}-${{ inputs.ref }}
+        restore-keys: |
+          wjm-core-ios-${{ runner.os }}-${{ steps.key.outputs.digest }}-
+
+    - name: Cache cargo registry sources only
+      if: ${{ inputs.cache-target != 'true' }}
+      uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+      with:
+        path: |
+          ~/.cargo/registry/index
+          ~/.cargo/registry/cache
+          ~/.cargo/git/db
+        key: wjm-core-registry-${{ runner.os }}-${{ steps.key.outputs.digest }}
+
+    - name: Build the core xcframework and Swift package
+      shell: bash
+      run: |
+        set -euo pipefail
+        # Keep build-ios.sh's per-tool logs where the failure upload below can reach them.
+        trap 'mkdir -p "$RUNNER_TEMP/wjm-core-logs"; cp -R "$WJM_CORE_DIR/target/ios-build/logs/." "$RUNNER_TEMP/wjm-core-logs/" 2>/dev/null || true' EXIT
+        cd "$WJM_CORE_DIR"
+        scripts/build-ios.sh
+        test -f dist/ios/WeJustMightCore/Package.swift
+
+    - name: Upload core build logs on failure
+      if: ${{ failure() }}
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+      with:
+        name: wjm-core-build-logs-${{ github.job }}
+        path: ${{ runner.temp }}/wjm-core-logs
+        if-no-files-found: ignore
+        retention-days: 7
