@@ -9,7 +9,7 @@ name: Python checks (reusable)
 #   checks-result    "success" when every python-versions leg of the checks job passed
 #                    (aggregated by the matrix-result job)
 #   security-result  "success" when the security job passed
-# Callers end checks.yml with the two alias jobs from STANDARD.md (`<job>` = the caller job
+# Callers end checks.yml with the two alias jobs from the fleet standard (mattas-net/standards, private; ci-cd/ci-workflows) (`<job>` = the caller job
 # that uses this workflow), so rulesets require exactly `checks` and `security` and a
 # python-versions change never invalidates a ruleset:
 #

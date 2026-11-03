@@ -1,6 +1,6 @@
 # Ruleset templates
 
-Repository rulesets applied to every repo in the standard (see [STANDARD.md](../STANDARD.md#rulesets)).
+Repository rulesets applied to every repo in the standard (see the fleet standard, mattas-net/standards, private: `docs/governance/branching-and-protection.md`).
 The JSON files are sanitized exports: no ids, no timestamps. `integration_id` 15368 is the GitHub
 Actions app. The bypass actor `actor_id: 5` is the repository Admin role.
 

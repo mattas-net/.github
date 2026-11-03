@@ -19,7 +19,7 @@ name: Apple CI (reusable)
 #   security-result  "success" when the security job passed
 #   test-result, lint-result, app-build-result, app-test-result
 #                    per-job results; deprecated, kept for one release (removed in WP-2d)
-# Callers end checks.yml with the two alias jobs from STANDARD.md (`<job>` = the caller job
+# Callers end checks.yml with the two alias jobs from the fleet standard (mattas-net/standards, private; ci-cd/ci-workflows) (`<job>` = the caller job
 # that uses this workflow), so rulesets require exactly `checks` and `security`:
 #
 #   checks:

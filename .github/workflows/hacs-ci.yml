@@ -12,7 +12,7 @@ name: HACS validation (reusable)
 #   security-result  "success" when the security job passed
 # A HACS caller has two shared jobs (python-ci + hacs-ci); its alias jobs need both and
 # require both results (python's checks-result and this one, likewise for security).
-# Alias job from STANDARD.md (`<job>` = the caller job that uses this workflow):
+# Alias job from the fleet standard (mattas-net/standards, private; ci-cd/ci-workflows) (`<job>` = the caller job that uses this workflow):
 #
 #   checks:
 #     needs: <job>
