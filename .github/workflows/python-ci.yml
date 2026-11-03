@@ -282,7 +282,7 @@ jobs:
           github-token: ${{ github.token }}
 
       # run_fuzzers takes one total budget and splits it across the targets, so turn the per-target
-      # input into a total. The count uses run_fuzzers' own discovery rule (oss-fuzz
+      # input into a total, clamped to 19800 s (330 min). The count uses run_fuzzers' own discovery rule (oss-fuzz
       # infra/utils.py get_fuzz_targets / is_fuzz_target_local) over build-out: a file whose name,
       # minus an optional .exe, matches ^[A-Za-z0-9_-]+$ and is not jazzer_driver*, that is
       # executable, and that either ends in _fuzzer or is a regular file containing
@@ -318,7 +318,13 @@ jobs:
             exit 1
           fi
           total=$((PER_TARGET * count))
-          echo "$count targets x ${PER_TARGET}s = ${total}s"
+          # Leave build and teardown headroom under the job's 360-minute timeout.
+          max_total=19800
+          if [ "$total" -gt "$max_total" ]; then
+            echo "::warning::Fuzz budget clamped to ${max_total}s: requested ${PER_TARGET}s per target, effective $((max_total / count))s per target over $count targets"
+            total=$max_total
+          fi
+          echo "$count targets, ${total}s total"
           echo "seconds=$total" >> "$GITHUB_OUTPUT"
 
       - name: Run fuzzers (code-change)

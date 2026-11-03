@@ -306,8 +306,9 @@ Outputs: `checks-result`, `security-result`
   counts the targets in `build-out` with run_fuzzers' discovery rule (oss-fuzz `infra/utils.py`
   `is_fuzz_target_local`: name minus an optional `.exe` matching `^[A-Za-z0-9_-]+$`, not `jazzer_driver*`,
   executable, and either ending in `_fuzzer` or containing `LLVMFuzzerTestOneInput`) and passes
-  per-target × count. No targets fails the job. Both jobs use the hosted-runner maximum of 360 minutes,
-  which caps a batch run at five targets at the default `3600`.
+  per-target × count. No targets fails the job. Both jobs use the hosted-runner maximum of 360 minutes, and
+  the total is clamped to 19800 s (330 minutes, leaving build headroom); a clamped run emits a warning with
+  the requested and effective per-target seconds (e.g. six batch targets at `3600` get 3300 s each).
 - Fuzz-job permissions: ClusterFuzzLite needs `contents: read` to clone and `actions: read` to find earlier
   batch runs' corpus and build artifacts (without it that lookup fails, logged and not fatal, and fuzzing
   starts from the seed corpus). A called job cannot be granted more than the calling job, and GitHub checks
