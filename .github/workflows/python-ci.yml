@@ -8,9 +8,9 @@ name: Python checks (reusable)
 # Outputs:
 #   checks-result    "success" when every python-versions leg of the checks job passed
 #                    (aggregated by the matrix-result job)
-#   security-result  "success" when the security job passed, and fuzz too when it is enabled
+#   security-result  "success" when the security job passed, and fuzz too when it runs (fuzz true, pull_request)
 #                    (fuzz: ClusterFuzzLite over the caller's .clusterfuzzlite/ atheris targets,
-#                    code-change mode, only when the `fuzz` input is true)
+#                    code-change mode, `fuzz-seconds` per target, on pull requests when `fuzz` is true)
 # Callers end checks.yml with the two alias jobs from the fleet standard (mattas-net/standards, private; ci-cd/ci-workflows) (`<job>` = the caller job
 # that uses this workflow), so rulesets require exactly `checks` and `security` and a
 # python-versions change never invalidates a ruleset:
@@ -89,11 +89,11 @@ on:
           **/pyproject.toml
           **/requirements*.txt
       fuzz:
-        description: Run the caller's ClusterFuzzLite targets (.clusterfuzzlite/) in code-change mode; a crash fails security-result.
+        description: On pull requests, run the caller's ClusterFuzzLite targets (.clusterfuzzlite/) in code-change mode; a crash fails security-result. The calling job must grant contents read and actions read.
         type: boolean
         default: false
       fuzz-seconds:
-        description: ClusterFuzzLite fuzz-seconds when fuzz is true (its total budget, split across the targets it runs).
+        description: Fuzzing seconds per target when fuzz is true (the job passes per-target x built targets to ClusterFuzzLite).
         type: number
         default: 600
     outputs:
@@ -101,10 +101,10 @@ on:
         description: '"success" when every python-versions leg of the checks job passed.'
         value: ${{ jobs.matrix-result.outputs.result }}
       security-result:
-        description: '"success" when the security job passed, and fuzz too when it is enabled.'
+        description: '"success" when the security job passed, and fuzz too when it runs (fuzz true, pull_request).'
         value: >-
           ${{ jobs.security.outputs.result == 'success'
-          && (!inputs.fuzz || jobs.fuzz.outputs.result == 'success')
+          && (!inputs.fuzz || github.event_name != 'pull_request' || jobs.fuzz.outputs.result == 'success')
           && 'success' || 'failure' }}
 
 # Actions are pinned by commit SHA; the comment names the tag each SHA was resolved from.
@@ -257,16 +257,20 @@ jobs:
         id: done
         run: echo "result=success" >> "$GITHUB_OUTPUT"
 
-  # ClusterFuzzLite against the caller's .clusterfuzzlite/ (project.yaml, Dockerfile, build.sh).
-  # The actions clone the repository themselves with github-token (no checkout step) and diff
-  # against the PR base (or the push's `before`) for code-change mode. No SARIF upload, so the
-  # job needs only contents: read; crash inputs are uploaded as workflow artifacts.
+  # ClusterFuzzLite against the caller's .clusterfuzzlite/ (project.yaml, Dockerfile, build.sh),
+  # on pull requests only. The actions clone the repository themselves with github-token (no
+  # checkout step) and diff against the PR base for code-change mode. No SARIF upload.
+  #
+  # No permissions block, on purpose: a called job cannot be granted more than the calling job,
+  # and GitHub checks that when it loads the workflow, even for a job its `if:` skips. Requesting
+  # actions: read here would break every caller that does not fuzz. The job inherits the calling
+  # job's token instead, so a caller with `fuzz: true` grants `contents: read` (clone) and
+  # `actions: read` (earlier batch runs' corpus and build artifacts) on the calling job.
   fuzz:
-    if: inputs.fuzz
+    if: inputs.fuzz && github.event_name == 'pull_request'
     runs-on: ubuntu-24.04
-    timeout-minutes: 120
-    permissions:
-      contents: read
+    # Hosted-runner maximum: the budget scales with the target count, which expressions cannot compute.
+    timeout-minutes: 360
     outputs:
       result: ${{ steps.done.outputs.result }}
     steps:
@@ -277,13 +281,53 @@ jobs:
           sanitizer: address
           github-token: ${{ github.token }}
 
+      # run_fuzzers takes one total budget and splits it across the targets, so turn the per-target
+      # input into a total. The count uses run_fuzzers' own discovery rule (oss-fuzz
+      # infra/utils.py get_fuzz_targets / is_fuzz_target_local) over build-out: a file whose name,
+      # minus an optional .exe, matches ^[A-Za-z0-9_-]+$ and is not jazzer_driver*, that is
+      # executable, and that either ends in _fuzzer or is a regular file containing
+      # LLVMFuzzerTestOneInput (compile_python_fuzzer's wrappers carry it as a comment).
+      - name: Fuzz budget (fuzz-seconds per target x targets)
+        id: budget
+        shell: bash
+        env:
+          PER_TARGET: ${{ inputs.fuzz-seconds }}
+        run: |
+          set -euo pipefail
+          if ! [[ "$PER_TARGET" =~ ^[1-9][0-9]*$ ]]; then
+            echo "::error::fuzz-seconds must be a positive whole number of seconds (got '$PER_TARGET')"
+            exit 1
+          fi
+          out="${GITHUB_WORKSPACE}/build-out"
+          count=0
+          while IFS= read -r -d '' path; do
+            name="${path##*/}"
+            base="$name"; ext=""
+            if [[ "$name" == ?*.* ]]; then base="${name%.*}"; ext=".${name##*.}"; fi
+            [[ "$ext" == "" || "$ext" == ".exe" ]] || continue
+            [[ "$base" =~ ^[A-Za-z0-9_-]+$ ]] || continue
+            [[ "$base" != jazzer_driver* ]] || continue
+            [ ! -d "$path" ] && [ -x "$path" ] || continue
+            if [[ "$base" == *_fuzzer ]] || { [ -f "$path" ] && grep -qaF LLVMFuzzerTestOneInput "$path"; }; then
+              echo "fuzz target: ${path#"$out"/}"
+              count=$((count + 1))
+            fi
+          done < <(find "$out" \( -type f -o -type l \) -print0 2>/dev/null || true)
+          if [ "$count" -eq 0 ]; then
+            echo "::error::No fuzz targets found in build-out; check .clusterfuzzlite/build.sh"
+            exit 1
+          fi
+          total=$((PER_TARGET * count))
+          echo "$count targets x ${PER_TARGET}s = ${total}s"
+          echo "seconds=$total" >> "$GITHUB_OUTPUT"
+
       - name: Run fuzzers (code-change)
         uses: google/clusterfuzzlite/actions/run_fuzzers@884713a6c30a92e5e8544c39945cd7cb630abcd1 # v1
         with:
           language: python
           sanitizer: address
           mode: code-change
-          fuzz-seconds: ${{ inputs.fuzz-seconds }}
+          fuzz-seconds: ${{ steps.budget.outputs.seconds }}
           github-token: ${{ github.token }}
 
       - name: Record result

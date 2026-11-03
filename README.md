@@ -292,21 +292,47 @@ Outputs: `checks-result`, `security-result`
   (dependency review on PRs, `pip-audit`) and `matrix-result`, which turns the matrix result into
   `checks-result`. `audit` is `strict`, `warn` or `off`.
 - `rust-ci.yml` jobs: `checks` (fmt, clippy `-D warnings`, test), optional `macos`, and `security` (cargo-deny).
-- Fuzzing (`fuzz: true` on `python-ci` / `rust-ci`) adds a `fuzz` job: ClusterFuzzLite
-  (`google/clusterfuzzlite/actions/build_fuzzers` and `run_fuzzers`, SHA-pinned) builds the caller's
-  `.clusterfuzzlite/` targets with AddressSanitizer and fuzzes them in `code-change` mode for `fuzz-seconds`.
-  `security-result` is `success` only when `security` passed and, with `fuzz` on, `fuzz` passed too; with
-  `fuzz` off the job is skipped and does not affect it, so no new required check. `fuzz-seconds` is
-  ClusterFuzzLite's total budget, which it splits across the targets it runs. The actions clone the repo
-  themselves with `github.token` (no checkout step); there is no SARIF upload, so the job needs only
-  `contents: read`, and crash inputs are uploaded as workflow artifacts.
-- `fuzz-batch.yml` is the deep run: the same build, `batch` mode, `fuzz-seconds` default `3600`, `language`
-  `rust` or `python` (must match `.clusterfuzzlite/project.yaml`). Callers dispatch it from a `fuzz.yml`
-  named `Fuzz` (`on: workflow_dispatch` only). ClusterFuzzLite finds earlier runs' corpus and build artifacts
-  through the Actions artifacts API, which needs `actions: read`; with `contents: read` only, that lookup
-  fails (logged, not fatal) and each run starts from the seed corpus in the build.
   `infra-ci.yml` jobs: `terraform`, `helm`, `shellcheck` and `security` (trivy config); the tools are pinned,
   sha256-verified binaries.
+- Fuzzing (`fuzz: true` on `python-ci` / `rust-ci`) adds a `fuzz` job that runs on pull requests only:
+  ClusterFuzzLite (`google/clusterfuzzlite/actions/build_fuzzers` and `run_fuzzers`, SHA-pinned) builds the
+  caller's `.clusterfuzzlite/` targets with AddressSanitizer and fuzzes them in `code-change` mode.
+  `security-result` is `success` only when `security` passed and, when the fuzz job runs, `fuzz` passed too;
+  with `fuzz` off, or on push and dispatch runs, the job is skipped and does not affect it, so there is no new
+  required check. The actions clone the repo themselves with `github.token` (no checkout step); there is no
+  SARIF upload, and crash inputs are uploaded as workflow artifacts.
+- `fuzz-seconds` is per target (default `600` in `python-ci` / `rust-ci`, `3600` in `fuzz-batch`).
+  ClusterFuzzLite's own `fuzz-seconds` is one total split across the targets, so after the build a step
+  counts the targets in `build-out` with run_fuzzers' discovery rule (oss-fuzz `infra/utils.py`
+  `is_fuzz_target_local`: name minus an optional `.exe` matching `^[A-Za-z0-9_-]+$`, not `jazzer_driver*`,
+  executable, and either ending in `_fuzzer` or containing `LLVMFuzzerTestOneInput`) and passes
+  per-target × count. No targets fails the job. Both jobs use the hosted-runner maximum of 360 minutes,
+  which caps a batch run at five targets at the default `3600`.
+- Fuzz-job permissions: ClusterFuzzLite needs `contents: read` to clone and `actions: read` to find earlier
+  batch runs' corpus and build artifacts (without it that lookup fails, logged and not fatal, and fuzzing
+  starts from the seed corpus). A called job cannot be granted more than the calling job, and GitHub checks
+  that when it loads the workflow, even for jobs an `if:` skips. So the `fuzz` job in `python-ci` / `rust-ci`
+  has no `permissions` block and inherits the calling job's token (existing callers are unaffected), and a
+  caller that sets `fuzz: true` must grant both on the calling job:
+
+  ```yaml
+  ci:
+    permissions:
+      contents: read
+      actions: read
+    uses: mattas-net/.github/.github/workflows/rust-ci.yml@main
+    with:
+      fuzz: true
+  ```
+
+  `fuzz-batch.yml` requests `contents: read` and `actions: read` itself, so its caller job must grant both too.
+- `fuzz-batch.yml` is the deep run: the same build in `batch` mode, `language` `rust` or `python` (must match
+  `.clusterfuzzlite/project.yaml`). Callers dispatch it from a `fuzz.yml` named `Fuzz`
+  (`on: workflow_dispatch` only).
+- Exception to SHA pinning: the ClusterFuzzLite actions are pinned by commit, but they run the Docker images
+  `gcr.io/oss-fuzz-base/clusterfuzzlite-build-fuzzers:v1` and `clusterfuzzlite-run-fuzzers:v1` (and the
+  `:ubuntu-24-04-v1` variants they pivot to) by tag, which Google can move. Pinning them by digest would
+  need a fork of the actions, so the unpinned images are an accepted exception.
 - `python-build.yml` builds the sdist and wheel, runs `twine check --strict` and fails unless the wheel version
   equals the tag. PyPI publishing stays in the caller (trusted publishing does not work inside a reusable
   workflow).

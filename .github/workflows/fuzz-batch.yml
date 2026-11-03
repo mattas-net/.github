@@ -1,12 +1,24 @@
 name: Fuzz batch (reusable)
 
 # Deep ClusterFuzzLite run: batch mode over every target in the caller's .clusterfuzzlite/
-# (project.yaml, Dockerfile, build.sh), built with AddressSanitizer. Callers dispatch it from a
-# `fuzz.yml` (name "Fuzz", on: workflow_dispatch only); the PR-time run is the `fuzz` input of
-# rust-ci / python-ci. A crash fails the run and uploads the crash input as a workflow artifact;
-# findings are filed by hand (fleet standard, mattas-net/standards (private), ci-cd/security-scanning).
-# The actions clone the repository themselves with github-token, so there is no checkout step.
-# No SARIF upload, so the job needs only contents: read.
+# (project.yaml, Dockerfile, build.sh), built with AddressSanitizer, `fuzz-seconds` per target.
+# Callers dispatch it from a `fuzz.yml` (name "Fuzz", on: workflow_dispatch only); the PR-time run
+# is the `fuzz` input of rust-ci / python-ci. A crash fails the run and uploads the crash input as
+# a workflow artifact; findings are filed by hand (fleet standard, mattas-net/standards (private),
+# ci-cd/security-scanning). The actions clone the repository themselves with github-token, so
+# there is no checkout step. No SARIF upload.
+#
+# The fuzz job requests contents: read (clone) and actions: read (earlier runs' corpus and build
+# artifacts). A called job cannot be granted more than the calling job, so the caller's job must
+# grant both:
+#
+#   fuzz:
+#     permissions:
+#       contents: read
+#       actions: read
+#     uses: mattas-net/.github/.github/workflows/fuzz-batch.yml@main
+#     with:
+#       language: rust
 on:
   workflow_call:
     inputs:
@@ -15,7 +27,7 @@ on:
         type: string
         required: true
       fuzz-seconds:
-        description: ClusterFuzzLite fuzz-seconds (its total budget, split across the targets).
+        description: Fuzzing seconds per target (the job passes per-target x built targets to ClusterFuzzLite).
         type: number
         default: 3600
 
@@ -26,9 +38,12 @@ permissions:
 jobs:
   fuzz:
     runs-on: ubuntu-24.04
+    # Hosted-runner maximum. Batch mode fuzzes every target for the full budget, so more than five
+    # targets at the default 3600 s per target do not fit in one job; lower fuzz-seconds for those.
     timeout-minutes: 360
     permissions:
       contents: read
+      actions: read
     steps:
       - name: Build fuzzers (address)
         uses: google/clusterfuzzlite/actions/build_fuzzers@884713a6c30a92e5e8544c39945cd7cb630abcd1 # v1
@@ -37,11 +52,51 @@ jobs:
           sanitizer: address
           github-token: ${{ github.token }}
 
+      # run_fuzzers takes one total budget and splits it across the targets, so turn the per-target
+      # input into a total. The count uses run_fuzzers' own discovery rule (oss-fuzz
+      # infra/utils.py get_fuzz_targets / is_fuzz_target_local) over build-out: a file whose name,
+      # minus an optional .exe, matches ^[A-Za-z0-9_-]+$ and is not jazzer_driver*, that is
+      # executable, and that either ends in _fuzzer or is a regular file containing
+      # LLVMFuzzerTestOneInput (compile_python_fuzzer's wrappers carry it as a comment).
+      - name: Fuzz budget (fuzz-seconds per target x targets)
+        id: budget
+        shell: bash
+        env:
+          PER_TARGET: ${{ inputs.fuzz-seconds }}
+        run: |
+          set -euo pipefail
+          if ! [[ "$PER_TARGET" =~ ^[1-9][0-9]*$ ]]; then
+            echo "::error::fuzz-seconds must be a positive whole number of seconds (got '$PER_TARGET')"
+            exit 1
+          fi
+          out="${GITHUB_WORKSPACE}/build-out"
+          count=0
+          while IFS= read -r -d '' path; do
+            name="${path##*/}"
+            base="$name"; ext=""
+            if [[ "$name" == ?*.* ]]; then base="${name%.*}"; ext=".${name##*.}"; fi
+            [[ "$ext" == "" || "$ext" == ".exe" ]] || continue
+            [[ "$base" =~ ^[A-Za-z0-9_-]+$ ]] || continue
+            [[ "$base" != jazzer_driver* ]] || continue
+            [ ! -d "$path" ] && [ -x "$path" ] || continue
+            if [[ "$base" == *_fuzzer ]] || { [ -f "$path" ] && grep -qaF LLVMFuzzerTestOneInput "$path"; }; then
+              echo "fuzz target: ${path#"$out"/}"
+              count=$((count + 1))
+            fi
+          done < <(find "$out" \( -type f -o -type l \) -print0 2>/dev/null || true)
+          if [ "$count" -eq 0 ]; then
+            echo "::error::No fuzz targets found in build-out; check .clusterfuzzlite/build.sh"
+            exit 1
+          fi
+          total=$((PER_TARGET * count))
+          echo "$count targets x ${PER_TARGET}s = ${total}s"
+          echo "seconds=$total" >> "$GITHUB_OUTPUT"
+
       - name: Run fuzzers (batch)
         uses: google/clusterfuzzlite/actions/run_fuzzers@884713a6c30a92e5e8544c39945cd7cb630abcd1 # v1
         with:
           language: ${{ inputs.language }}
           sanitizer: address
           mode: batch
-          fuzz-seconds: ${{ inputs.fuzz-seconds }}
+          fuzz-seconds: ${{ steps.budget.outputs.seconds }}
           github-token: ${{ github.token }}
