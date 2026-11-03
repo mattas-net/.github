@@ -312,7 +312,7 @@ jobs:
           echo "version=$(printf '%s\n' "$version" | tr -c 'A-Za-z0-9.\n' '-')" >> "$GITHUB_OUTPUT"
 
       - name: Cache SwiftPM build
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ inputs.package-path }}/.build
           key: swiftpm-build-${{ runner.os }}-${{ steps.swift.outputs.version }}-${{ hashFiles(format('{0}/Package.swift', inputs.package-path), format('{0}/Package.resolved', inputs.package-path), inputs.rust-core-ref != '' && inputs.rust-core-ref || 'no-core') }}
@@ -524,7 +524,7 @@ jobs:
         run: echo "version=$(xcodebuild -version | tr -c 'A-Za-z0-9.\n' '-' | tr '\n' '_')" >> "$GITHUB_OUTPUT"
 
       - name: Cache resolved SwiftPM packages
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ runner.temp }}/DerivedData/SourcePackages
           key: swiftpm-app-${{ runner.os }}-${{ steps.xcode.outputs.version }}-${{ hashFiles(format('{0}/project.yml', inputs.project-dir), format('{0}/**/Package.resolved', inputs.project-dir), format('{0}/**/Package.swift', inputs.project-dir)) }}
