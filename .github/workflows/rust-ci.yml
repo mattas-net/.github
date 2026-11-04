@@ -312,7 +312,7 @@ jobs:
             [[ "$ext" == "" || "$ext" == ".exe" ]] || continue
             [[ "$base" =~ ^[A-Za-z0-9_-]+$ ]] || continue
             [[ "$base" != jazzer_driver* ]] || continue
-            [ ! -d "$path" ] && [ -x "$path" ] || continue
+            if [ -d "$path" ] || [ ! -x "$path" ]; then continue; fi
             if [[ "$base" == *_fuzzer ]] || { [ -f "$path" ] && grep -qaF LLVMFuzzerTestOneInput "$path"; }; then
               echo "fuzz target: ${path#"$out"/}"
               count=$((count + 1))
