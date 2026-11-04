@@ -8,12 +8,14 @@ name: Rust checks (reusable)
 #   macos     macos true (macos-26)   `macos-commands`, e.g. the Apple-target checks of a crate with iOS bindings
 #   security  always (ubuntu-24.04)   cargo-deny: `check` (all of deny.toml) when deny.toml exists,
 #                                     else `check advisories` (the RustSec database, as cargo audit)
+#   fuzz      fuzz true, PRs only     ClusterFuzzLite: builds the caller's .clusterfuzzlite/ targets with
+#             (ubuntu-24.04)          ASan and fuzzes them in code-change mode, `fuzz-seconds` per target
 # The toolchain is rust-toolchain.toml (or rust-toolchain) when the project has one, else the
 # `toolchain` input; rustfmt and clippy are always added.
 #
 # Outputs:
 #   checks-result    "success" when checks passed, and macos too when it is enabled
-#   security-result  "success" when the security job passed
+#   security-result  "success" when the security job passed, and fuzz too when it runs (fuzz true, pull_request)
 # Callers end checks.yml with the two alias jobs from the fleet standard (mattas-net/standards, private; ci-cd/ci-workflows) (`<job>` = the caller job
 # that uses this workflow), so rulesets require exactly `checks` and `security`:
 #
@@ -60,6 +62,14 @@ on:
         description: Shell run on macos-26 when macos is true, after the toolchain is installed.
         type: string
         default: cargo test --locked
+      fuzz:
+        description: On pull requests, run the caller's ClusterFuzzLite targets (.clusterfuzzlite/) in code-change mode; a crash fails security-result. The calling job must grant contents read and actions read.
+        type: boolean
+        default: false
+      fuzz-seconds:
+        description: Fuzzing seconds per target when fuzz is true (the job passes per-target x built targets to ClusterFuzzLite).
+        type: number
+        default: 600
     outputs:
       checks-result:
         description: '"success" when checks passed, and macos too when it is enabled.'
@@ -68,11 +78,14 @@ on:
           && (!inputs.macos || jobs.macos.outputs.result == 'success')
           && 'success' || 'failure' }}
       security-result:
-        description: '"success" when the security job passed.'
-        value: ${{ jobs.security.outputs.result }}
+        description: '"success" when the security job passed, and fuzz too when it runs (fuzz true, pull_request).'
+        value: >-
+          ${{ jobs.security.outputs.result == 'success'
+          && (!inputs.fuzz || github.event_name != 'pull_request' || jobs.fuzz.outputs.result == 'success')
+          && 'success' || 'failure' }}
 
-permissions:
-  contents: read
+# No workflow-level permissions: they would also cap the fuzz job, which inherits the calling
+# job's token (see the fuzz job). Every other job sets contents: read itself.
 
 env:
   CARGO_TERM_COLOR: never
@@ -83,6 +96,8 @@ jobs:
   checks:
     runs-on: ubuntu-24.04
     timeout-minutes: 45
+    permissions:
+      contents: read
     outputs:
       result: ${{ steps.done.outputs.result }}
     defaults:
@@ -146,6 +161,8 @@ jobs:
     if: inputs.macos
     runs-on: macos-26
     timeout-minutes: 60
+    permissions:
+      contents: read
     outputs:
       result: ${{ steps.done.outputs.result }}
     defaults:
@@ -196,6 +213,8 @@ jobs:
   security:
     runs-on: ubuntu-24.04
     timeout-minutes: 15
+    permissions:
+      contents: read
     outputs:
       result: ${{ steps.done.outputs.result }}
     defaults:
@@ -238,6 +257,94 @@ jobs:
             echo "No deny.toml: checking advisories only"
             cargo deny --locked check advisories
           fi
+
+      - name: Record result
+        id: done
+        run: echo "result=success" >> "$GITHUB_OUTPUT"
+
+  # ClusterFuzzLite against the caller's .clusterfuzzlite/ (project.yaml, Dockerfile, build.sh),
+  # on pull requests only. The actions clone the repository themselves with github-token (no
+  # checkout step) and diff against the PR base for code-change mode. No SARIF upload.
+  #
+  # No permissions block, on purpose: a called job cannot be granted more than the calling job,
+  # and GitHub checks that when it loads the workflow, even for a job its `if:` skips. Requesting
+  # actions: read here would break every caller that does not fuzz. The job inherits the calling
+  # job's token instead, so a caller with `fuzz: true` grants `contents: read` (clone) and
+  # `actions: read` (earlier batch runs' corpus and build artifacts) on the calling job.
+  fuzz:
+    if: inputs.fuzz && github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
+    # Hosted-runner maximum: the budget scales with the target count, which expressions cannot compute.
+    timeout-minutes: 360
+    outputs:
+      result: ${{ steps.done.outputs.result }}
+    steps:
+      - name: Build fuzzers (address)
+        uses: google/clusterfuzzlite/actions/build_fuzzers@884713a6c30a92e5e8544c39945cd7cb630abcd1 # v1
+        with:
+          language: rust
+          sanitizer: address
+          github-token: ${{ github.token }}
+
+      # run_fuzzers takes one total budget and splits it across the targets, so turn the per-target
+      # input into a total, clamped to 19800 s (330 min). The count uses run_fuzzers' own discovery rule (oss-fuzz
+      # infra/utils.py get_fuzz_targets / is_fuzz_target_local) over build-out: a file whose name,
+      # minus an optional .exe, matches ^[A-Za-z0-9_-]+$ and is not jazzer_driver*, that is
+      # executable, and that either ends in _fuzzer or is a regular file containing
+      # LLVMFuzzerTestOneInput (compile_python_fuzzer's wrappers carry it as a comment).
+      - name: Fuzz budget (fuzz-seconds per target x targets)
+        id: budget
+        shell: bash
+        env:
+          PER_TARGET: ${{ inputs.fuzz-seconds }}
+        run: |
+          set -euo pipefail
+          if ! [[ "$PER_TARGET" =~ ^[1-9][0-9]*$ ]]; then
+            echo "::error::fuzz-seconds must be a positive whole number of seconds (got '$PER_TARGET')"
+            exit 1
+          fi
+          out="${GITHUB_WORKSPACE}/build-out"
+          count=0
+          while IFS= read -r -d '' path; do
+            name="${path##*/}"
+            base="$name"; ext=""
+            if [[ "$name" == ?*.* ]]; then base="${name%.*}"; ext=".${name##*.}"; fi
+            [[ "$ext" == "" || "$ext" == ".exe" ]] || continue
+            [[ "$base" =~ ^[A-Za-z0-9_-]+$ ]] || continue
+            [[ "$base" != jazzer_driver* ]] || continue
+            if [ -d "$path" ] || [ ! -x "$path" ]; then continue; fi
+            if [[ "$base" == *_fuzzer ]] || { [ -f "$path" ] && grep -qaF LLVMFuzzerTestOneInput "$path"; }; then
+              echo "fuzz target: ${path#"$out"/}"
+              count=$((count + 1))
+            fi
+          done < <(find "$out" \( -type f -o -type l \) -print0 2>/dev/null || true)
+          if [ "$count" -eq 0 ]; then
+            echo "::error::No fuzz targets found in build-out; check .clusterfuzzlite/build.sh"
+            exit 1
+          fi
+          # Leave build and teardown headroom under the job's 360-minute timeout.
+          max_total=19800
+          # More than 5 digits always exceeds the cap; skip the multiply so it cannot overflow.
+          if [ "${#PER_TARGET}" -gt 5 ]; then
+            total=$((max_total + 1))
+          else
+            total=$((PER_TARGET * count))
+          fi
+          if [ "$total" -gt "$max_total" ]; then
+            echo "::warning::Fuzz budget clamped to ${max_total}s: requested ${PER_TARGET}s per target, effective $((max_total / count))s per target over $count targets"
+            total=$max_total
+          fi
+          echo "$count targets, ${total}s total"
+          echo "seconds=$total" >> "$GITHUB_OUTPUT"
+
+      - name: Run fuzzers (code-change)
+        uses: google/clusterfuzzlite/actions/run_fuzzers@884713a6c30a92e5e8544c39945cd7cb630abcd1 # v1
+        with:
+          language: rust
+          sanitizer: address
+          mode: code-change
+          fuzz-seconds: ${{ steps.budget.outputs.seconds }}
+          github-token: ${{ github.token }}
 
       - name: Record result
         id: done
