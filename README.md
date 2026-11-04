@@ -111,6 +111,11 @@ Secrets: `extra-ssh-key`
 | `language` | string |  | yes |
 | `fuzz-seconds` | number | `3600` |  |
 
+A `changed` gate job runs first. A scheduled run is skipped (with a notice) when `github.sha` equals the
+`head_sha` of the last completed, non-cancelled scheduled run of the same workflow on the branch, i.e. no
+new commits since the last fuzz. `workflow_dispatch` always runs, and so does the first scheduled run (no
+earlier run to compare against). The gate needs `actions: read`, which the caller job already grants.
+
 ### `hacs-ci.yml`
 
 | Input | Type | Default | Required |
@@ -328,8 +333,10 @@ Outputs: `checks-result`, `security-result`
 
   `fuzz-batch.yml` requests `contents: read` and `actions: read` itself, so its caller job must grant both too.
 - `fuzz-batch.yml` is the deep run: the same build in `batch` mode, `language` `rust` or `python` (must match
-  `.clusterfuzzlite/project.yaml`). Callers dispatch it from a `fuzz.yml` named `Fuzz`
-  (`on: workflow_dispatch` only).
+  `.clusterfuzzlite/project.yaml`). Callers run it from a `fuzz.yml` named `Fuzz` on a monthly `schedule`
+  plus `workflow_dispatch`; scheduled runs with no new commits since the last scheduled run are skipped.
+  The PR-time `fuzz` input of `python-ci` / `rust-ci` remains available, but the fleet standard does not use
+  it; the standard run is the monthly gated `Fuzz` schedule.
 - Exception to SHA pinning: the ClusterFuzzLite actions are pinned by commit, but they run the Docker images
   `gcr.io/oss-fuzz-base/clusterfuzzlite-build-fuzzers:v1` and `clusterfuzzlite-run-fuzzers:v1` (and the
   `:ubuntu-24-04-v1` variants they pivot to) by tag, which Google can move. Pinning them by digest would
