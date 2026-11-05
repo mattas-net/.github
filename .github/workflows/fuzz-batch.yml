@@ -32,9 +32,9 @@ on:
         type: string
         required: true
       fuzz-seconds:
-        description: Fuzzing seconds per target (the job passes per-target x built targets to ClusterFuzzLite).
+        description: Fuzzing seconds per target (the job passes per-target x built targets to ClusterFuzzLite). The fleet standard is 600 (10 minutes).
         type: number
-        default: 3600
+        default: 600
 
 permissions:
   contents: read
@@ -81,8 +81,8 @@ jobs:
     needs: changed
     if: needs.changed.outputs.run == 'true'
     runs-on: ubuntu-24.04
-    # Hosted-runner maximum. The budget step clamps the total to 19800 s (330 min), so more than five
-    # targets at the default 3600 s each get a smaller even share, with a warning.
+    # Hosted-runner maximum. The budget step clamps the total to 19800 s (330 min); at the default
+    # 600 s per target that is 33 targets, and more get a smaller even share, with a warning.
     timeout-minutes: 360
     permissions:
       contents: read
