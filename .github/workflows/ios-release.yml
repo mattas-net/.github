@@ -233,7 +233,7 @@ jobs:
     needs: ci
     # always() lets the job run when verify is false (ci skipped); a failed ci blocks it.
     if: always() && needs.ci.result != 'failure' && needs.ci.result != 'cancelled'
-    runs-on: macos-26
+    runs-on: xcode-27
     timeout-minutes: 120
     environment: ${{ inputs.environment }}
     # Serialize uploads per repo and never cancel one mid-upload.

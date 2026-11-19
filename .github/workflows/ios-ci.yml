@@ -2,8 +2,12 @@ name: Apple CI (reusable)
 
 # Checks for an iOS or macOS app: SwiftPM unit tests, SwiftLint, a compile-only app build,
 # optional Xcode test bundles, and an optional signed archive/export (main only). Every job
-# runs on macos-26, so callers keep this behind a manual dispatch or the PR approval gate;
+# runs on xcode-27, so callers keep this behind a manual dispatch or the PR approval gate;
 # ios-release.yml calls it before every archive, which is the one place it always runs.
+#
+# xcode-27 is GitHub's hosted macOS 27 image and carries Xcode 27.x only, so a caller's
+# xcode-version (or xcode-version-file) must name an Xcode 27 release: one pinned to Xcode 26
+# or older fails at "Select Xcode".
 #
 # Jobs and when they run:
 #   test             package-path set        swift test, then test-commands
@@ -219,7 +223,7 @@ permissions:
 jobs:
   test:
     if: inputs.package-path != ''
-    runs-on: macos-26
+    runs-on: xcode-27
     timeout-minutes: 45
     outputs:
       result: ${{ steps.done.outputs.result }}
@@ -353,7 +357,7 @@ jobs:
 
   lint:
     if: inputs.lint
-    runs-on: macos-26
+    runs-on: xcode-27
     timeout-minutes: 15
     outputs:
       result: ${{ steps.done.outputs.result }}
@@ -398,7 +402,7 @@ jobs:
   # Compile-only build of the app target (an app target is not covered by `swift test`).
   app-build:
     if: inputs.app-build
-    runs-on: macos-26
+    runs-on: xcode-27
     timeout-minutes: 60
     outputs:
       result: ${{ steps.done.outputs.result }}
@@ -574,7 +578,7 @@ jobs:
   # Xcode test bundles that `swift test` cannot reach (app-target unit tests, UI tests).
   app-test:
     if: inputs.app-test
-    runs-on: macos-26
+    runs-on: xcode-27
     timeout-minutes: 75
     outputs:
       result: ${{ steps.done.outputs.result }}
@@ -799,7 +803,7 @@ jobs:
     if: >-
       always() && inputs.archive-validate && github.ref == 'refs/heads/main'
       && !contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled')
-    runs-on: macos-26
+    runs-on: xcode-27
     timeout-minutes: 90
     steps:
       # Defence in depth: fail before checkout if the job-level guard is ever loosened.
