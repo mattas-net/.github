@@ -1,0 +1,7 @@
+# actionlint configuration for this repository's workflows.
+self-hosted-runner:
+  # GitHub-hosted labels that actionlint's built-in list does not know yet. Not self-hosted:
+  # this key is simply where actionlint accepts extra runner labels.
+  # xcode-27: the hosted macOS 27 image, the only one that carries Xcode 27 (ios-ci, ios-release).
+  labels:
+    - xcode-27

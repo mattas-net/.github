@@ -135,6 +135,8 @@ Outputs: `checks-result`, `security-result`
 
 ### `ios-ci.yml`
 
+Runs on the `xcode-27` runner (GitHub's hosted macOS 27 image), which carries Xcode 27.x only: `xcode-version` or `xcode-version-file` must name an Xcode 27 release.
+
 | Input | Type | Default | Required |
 |---|---|---|---|
 | `ref` | string | `""` |  |
@@ -174,6 +176,8 @@ Secrets: `WJM_CORE_DEPLOY_KEY`, `DISTRIBUTION_CERT_P12_BASE64`, `DISTRIBUTION_CE
 Outputs: `checks-result`, `security-result`, `test-result`, `lint-result`, `app-build-result`, `app-test-result`
 
 ### `ios-release.yml`
+
+Runs on the `xcode-27` runner (GitHub's hosted macOS 27 image), which carries Xcode 27.x only: `xcode-version` or `xcode-version-file` must name an Xcode 27 release.
 
 | Input | Type | Default | Required |
 |---|---|---|---|
